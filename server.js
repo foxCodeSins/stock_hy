@@ -340,6 +340,138 @@ async function getDashboard(query, force) {
   return dashCache.inflight;
 }
 
+/* ─────────── 涨停回踩支撑 · 历史回溯（成功率） ─────────── */
+const backtestCache = { at: 0, key: '', value: null, inflight: null };
+const toKlineDate = d => {
+  const s = String(d || '');
+  return /^\d{8}$/.test(s) ? s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8) : s;
+};
+
+async function buildBacktest(query) {
+  const t0 = Date.now();
+  const q = { ...query };
+  delete q._; delete q.force;
+  const window = [3, 5, 10].includes(Number(q.window)) ? Number(q.window) : 5;
+  const dayCount = Math.min(10, Math.max(3, Number(q.days) || 10));
+  const perDay = Math.min(40, Math.max(8, Number(q.perDay) || 30));
+  const maxCodes = Math.min(220, Math.max(40, Number(q.maxCodes) || 180));
+
+  // 1) 历史涨停池：交易日以请求日期为准，降序（最新在前）
+  const hist = await ds.getLimitUpHistory(dayCount + 12);
+  const allDates = (hist.dates || []).map(d => d.date);
+  const baseDates = allDates.slice(0, dayCount);
+  const methodology = an.BACKTEST_METHOD;
+
+  if (!baseDates.length) {
+    return {
+      meta: { ...beijingNow(), generatedAt: new Date().toISOString(), elapsedMs: Date.now() - t0, window, dayCount, perDay, baseDates: [], historyDays: 0, plannedCount: 0, codesRequested: 0, klineOk: 0, klineSources: [], skipped: {}, methodology, disclaimer: DISCLAIMER, emptyReason: '东方财富历史涨停池未返回任何交易日，无法回溯；系统不填充推测数据。' },
+      days: [], rows: [], summary: an.summarizeBacktest([]), methodology
+    };
+  }
+
+  // 2) 逐基准日重建候选：只取「该基准日之前 2~10 个交易日已公布」的涨停池，
+  //    绝不使用基准日之后才出现的名单（避免幸存者偏差 / 未来函数）
+  const plan = [];
+  baseDates.forEach((d, i) => {
+    const map = new Map();
+    for (let back = 2; back <= 10; back++) {
+      const pd = allDates[i + back];
+      if (!pd) continue;
+      for (const r of (hist.byDate[pd] || [])) {
+        if (!r || !r.code || /ST/i.test(r.name || '')) continue;
+        const prev = map.get(r.code);
+        if (!prev || (r.amount || 0) > (prev.amount || 0)) map.set(r.code, { ...r, poolDate: pd });
+      }
+    }
+    const picked = [...map.values()].sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, perDay);
+    picked.forEach(r => plan.push({
+      date: d, code: r.code, name: r.name, industry: r.industry,
+      poolDate: r.poolDate, amount: r.amount
+    }));
+  });
+
+  // 3) 代码去重：每只只拉一次日K，覆盖多个基准日；按覆盖日数 / 成交额优先
+  const stat = new Map();
+  plan.forEach(p => {
+    const s = stat.get(p.code) || { code: p.code, name: p.name, hits: 0, amount: 0 };
+    s.hits++; s.amount = Math.max(s.amount, p.amount || 0);
+    stat.set(p.code, s);
+  });
+  const codes = [...stat.values()]
+    .sort((a, b) => b.hits - a.hits || b.amount - a.amount)
+    .slice(0, maxCodes).map(x => x.code);
+  const kdata = await limitedMap(codes, 4, c => ds.getKlineData(c, 90).catch(() => null));
+  const kByCode = new Map();
+  codes.forEach((c, i) => { if (kdata[i] && kdata[i].rows && kdata[i].rows.length) kByCode.set(c, kdata[i]); });
+
+  // 4) 时点切片重跑划线 → 用后续真实日K判定结果
+  const rows = [], skipped = {};
+  const skip = reason => { skipped[reason] = (skipped[reason] || 0) + 1; };
+  for (const p of plan) {
+    const kd = kByCode.get(p.code);
+    if (!kd) { skip('日K未取得（上游不可用）'); continue; }
+    const kl = kd.rows;
+    const idx = kl.findIndex(b => b.date === toKlineDate(p.date));
+    if (idx < 30) { skip('基准日缺失或此前历史K线不足 30 根（停牌/新股）'); continue; }
+    const visible = kl.slice(0, idx + 1);   // 关键：只给基准日及之前，杜绝未来函数
+    const a = an.pullbackAnalysis(visible, { price: kl[idx].close },
+      { code: p.code, name: p.name, date: p.poolDate },
+      { code: p.code, klineSource: kd.source, priceSource: '基准日真实日K收盘价（历史回放）' });
+    if (!a.available) { skip(a.reason); continue; }
+    const outcome = an.backtestOutcome(kl, idx, a.plan, window);
+    if (!outcome) { skip('目标/止损价位异常，无法判定'); continue; }
+    rows.push({
+      date: p.date, code: p.code, name: p.name, industry: p.industry,
+      board: ds.boardOf(p.code), poolDate: p.poolDate,
+      level: a.level, score: a.score, status: a.status, nearPct: a.nearPct,
+      support: a.primarySupport.short, supportPrice: a.primarySupport.price,
+      target: a.plan.target, stop: a.plan.stop, rr: a.plan.rr,
+      ztDate: a.ztDate, sinceZt: a.sinceZt, klineSource: kd.source,
+      outcome
+    });
+  }
+
+  // 5) 逐日 / 整体汇总
+  const days = baseDates.map(d => {
+    const list = rows.filter(r => r.date === d);
+    return {
+      date: d, ...an.summarizeBacktest(list),
+      plannedCount: plan.filter(p => p.date === d).length
+    };
+  });
+  const klineSources = [...new Set([...kByCode.values()].map(k => k.source).filter(Boolean))];
+  const meta = {
+    ...beijingNow(), generatedAt: new Date().toISOString(), elapsedMs: Date.now() - t0,
+    window, dayCount, perDay, maxCodes,
+    historyDays: allDates.length,
+    historyRange: [allDates[allDates.length - 1], allDates[0]],
+    baseDates, plannedCount: plan.length, codesRequested: codes.length,
+    klineOk: kByCode.size, skipped, klineSources,
+    fallback: klineSources.some(s => /新浪/.test(s)),
+    methodology,
+    dataSourceNote: '候选=东方财富历史涨停池（按基准日之前的交易日切片，不使用未来名单）；基准价/划线/结果判定=腾讯证券前复权日K（限流时自动降级新浪不复权并逐只标注）；历史市场档位无法回溯，评分中该因子固定 5 分。',
+    disclaimer: DISCLAIMER
+  };
+  return { meta, days, rows, summary: an.summarizeBacktest(rows), methodology };
+}
+
+async function getBacktest(query, force) {
+  const key = JSON.stringify({
+    window: query.window || '', days: query.days || '',
+    perDay: query.perDay || '', maxCodes: query.maxCodes || ''
+  });
+  if (!force && backtestCache.value && backtestCache.key === key && Date.now() - backtestCache.at < 600000) return backtestCache.value;
+  if (backtestCache.inflight) return backtestCache.inflight;
+  backtestCache.inflight = (async () => {
+    try {
+      const v = await buildBacktest(query);
+      backtestCache.value = v; backtestCache.key = key; backtestCache.at = Date.now();
+      return v;
+    } finally { backtestCache.inflight = null; }
+  })();
+  return backtestCache.inflight;
+}
+
 /* ─────────── 路由 ─────────── */
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost:' + ACTIVE_PORT);
@@ -347,6 +479,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (u.pathname === '/api/dashboard') return sendJson(res, await getDashboard(q, q.force === '1'));
     if (u.pathname === '/api/pullback') return sendJson(res, await getPullback(q, q.force === '1'));
+    if (u.pathname === '/api/backtest') return sendJson(res, await getBacktest(q, q.force === '1'));
     if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), disclaimer: DISCLAIMER });
     if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
     if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());

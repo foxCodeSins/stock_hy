@@ -28,7 +28,9 @@
     collapsed: new Set(), expanded: new Set(), chartsReady: !!window.echarts,
     lastFilters: '',
     pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
-    pullFilters: '', pullError: null, pullMethodOpen: false, pullOfflineTimer: null
+    pullFilters: '', pullError: null, pullMethodOpen: false, pullOfflineTimer: null, pullDays: 8,
+    bt: null, btLoading: false, btError: null, btOpen: false,
+    btDate: 'all', btWindow: 5, btMethodOpen: false
   };
   const activeHealth = m => (m.health || []).filter(h => !h.standby);
 
@@ -583,6 +585,171 @@
   }
   const pbKv = (k, v) => '<div class="pb-kv"><span>' + E(k) + '</span><b>' + v + '</b></div>';
 
+  /* ─────────── 历史回溯 · 成功率验证 ─────────── */
+  const btDateLabel = d => String(d || '').length === 8 ? d.slice(4, 6) + '-' + d.slice(6, 8) : String(d || '—');
+  const btPct = v => (v === null || v === undefined) ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%';
+  const btKpi = (label, value, sub, cls) =>
+    '<div class="bt-kpi"><span class="lbl">' + E(label) + '</span><b class="' + (cls || '') + '">' + value + '</b>' +
+    '<span class="small muted">' + E(sub || '') + '</span></div>';
+  const btLevelCls = l => l === '重点观察' ? 'red' : l === '条件观察' ? 'warn' : l === '已失效' ? 'green' : '';
+  const btResultTag = r => '<span class="bt-result ' +
+    (r === '达标' ? 'up' : r === '止损' ? 'down' : r === '观察中' ? 'blue' : '') + '">' + E(r || '—') + '</span>';
+
+  function btTrendSvg(days) {
+    if (!days || !days.length) return '';
+    const W = 700, H = 152, L = 26, R = 8, T = 18, B = 36;
+    const n = days.length, gap = (W - L - R) / n, bw = Math.min(50, gap - 10);
+    const hOf = v => (H - T - B) * (Number(v) || 0) / 100;
+    const y50 = H - B - hOf(50);
+    const bars = days.map((d, i) => {
+      const x = L + i * gap + (gap - bw) / 2;
+      const rate = d.winRate;
+      const h = rate === null ? 5 : Math.max(2, hOf(rate));
+      const y = H - B - h;
+      const fill = rate === null ? '#cbd5e1' : rate >= 60 ? '#d92b2b' : rate >= 40 ? '#d97706' : '#0f9960';
+      const tip = btDateLabel(d.date) + '：成功率 ' + (rate === null ? '观察中' : rate + '%') +
+        '，已完结 ' + d.completed + ' / 样本 ' + d.total;
+      return '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) +
+        '" rx="3" fill="' + fill + '" opacity="' + (rate === null ? '.5' : '.88') + '"><title>' + E(tip) + '</title></rect>' +
+        '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 4).toFixed(1) + '" text-anchor="middle" font-size="10" fill="#4b5b6b">' +
+        (rate === null ? '—' : rate + '%') + '</text>' +
+        '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - B + 14) + '" text-anchor="middle" font-size="9.5" fill="#8593a3">' + E(btDateLabel(d.date)) + '</text>' +
+        '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (H - B + 26) + '" text-anchor="middle" font-size="9" fill="#8593a3">n=' + E(d.completed) + '</text>';
+    }).join('');
+    return '<div class="bt-trend"><div class="bt-h5">近 ' + n + ' 个基准日成功率趋势（柱高为成功率，n 为已完结样本数）</div>' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="152" role="img" aria-label="每日成功率柱状图">' +
+      '<line x1="' + L + '" y1="' + y50.toFixed(1) + '" x2="' + (W - R) + '" y2="' + y50.toFixed(1) +
+      '" stroke="#e4e9f0" stroke-dasharray="4 4"/>' +
+      '<text x="2" y="' + (y50 + 3).toFixed(1) + '" font-size="9" fill="#8593a3">50%</text>' + bars + '</svg></div>';
+  }
+
+  function btCardInner() {
+    const head = '<div class="bt-head"><div><h4>历史回溯 · 成功率验证</h4>' +
+      '<div class="small muted">选一个过去的交易日，用当时可见的日K重跑划线规则，再用之后 N 根真实K线检验「目标 / 止损」是否兑现。</div></div>' +
+      '<button class="btn" id="btToggle">' + (S.btOpen ? '收起' : '展开回溯近 10 日') + '</button></div>';
+    if (!S.btOpen) return head;
+
+    const j = S.bt;
+    const dates = (j && j.meta && j.meta.baseDates) || [];
+    const dateOpts = ['<option value="all"' + (S.btDate === 'all' ? ' selected' : '') + '>近 ' + (dates.length || 10) + ' 日汇总</option>']
+      .concat(dates.map(d => '<option value="' + E(d) + '"' + (S.btDate === d ? ' selected' : '') + '>' + E(btDateLabel(d)) + ' 基准日</option>')).join('');
+    const winOpts = [3, 5, 10].map(w => '<option value="' + w + '"' + (S.btWindow === w ? ' selected' : '') + '>' + w + ' 个交易日</option>').join('');
+    const controls = '<div class="bt-controls"><label>基准日 <select class="sel" id="btDate">' + dateOpts + '</select></label>' +
+      '<label>观察窗口 <select class="sel" id="btWindow">' + winOpts + '</select></label>' +
+      '<button class="btn" id="btReload">重新计算</button>' +
+      '<button class="link-btn" id="btMethod">' + (S.btMethodOpen ? '收起' : '查看') + '口径说明</button></div>';
+
+    if (S.btLoading) return head + controls + '<div class="bt-state">正在回溯近 10 个交易日、逐只核对真实日K并判定结果…（首次约需数秒）</div>';
+    if (S.btError) return head + controls + '<div class="bt-state err">' +
+      (isConnError(new Error(S.btError)) && /Failed to fetch|fetch failed|NetworkError/i.test(S.btError)
+        ? '无法连接本地服务：' + E(SERVICE_HINT)
+        : '历史回溯失败：' + E(S.btError)) +
+      '<br><span class="small muted">系统不会用推测数据填充统计。</span></div>' +
+      '<div style="margin-top:10px"><button class="btn btn-primary" id="btRetry">重新回溯</button></div>';
+    if (!j) return head + controls + '<div class="bt-state">点击「重新计算」开始回溯。</div>';
+
+    const m = j.meta || {};
+    const sum = S.btDate === 'all' ? (j.summary || {}) : (j.days || []).find(d => d.date === S.btDate) || {};
+    const rows = S.btDate === 'all' ? (j.rows || []) : (j.rows || []).filter(r => r.date === S.btDate);
+    const done = sum.completed || 0;
+    const warn = '<div class="bt-warn"><b>口径提醒</b>：这是「触及型」判定（目标通常仅 +2%~+8%，止损约 −3%），成功率天然偏高，' +
+      '<b>不等于真实交易胜率</b>；请同时看平均收益与止损率。同一标的会在多个基准日重复出现，样本不独立。</div>';
+    const fb = m.fallback ? '<div class="pb-warn">口径提示：腾讯前复权日K当前不可用，本轮回测已降级为「新浪财经日K（不复权）」；除权个股历史价位可能与前复权不一致。</div>' : '';
+    const kpis = '<div class="bt-kpi-grid">' +
+      btKpi('已完结样本', E(done), '总样本 ' + E(sum.total || 0) + ' 个') +
+      btKpi('成功率', (sum.winRate === null || sum.winRate === undefined) ? '—' : sum.winRate + '%', '达标 ' + E(sum.success || 0) + ' 个', 'up') +
+      btKpi('止损率', (sum.stopRate === null || sum.stopRate === undefined) ? '—' : sum.stopRate + '%', '止损 ' + E(sum.stopped || 0) + ' 个', 'down') +
+      btKpi('平均收益', btPct(sum.avgReturn), '单笔最好 ' + btPct(sum.best) + ' / 最差 ' + btPct(sum.worst), (sum.avgReturn > 0 ? 'up' : sum.avgReturn < 0 ? 'down' : '')) +
+      btKpi('观察中', E(sum.watching || 0), '窗口未走完，不计入分母') +
+      btKpi('未触发', E(sum.timeout || 0), '窗口内未触及目标/止损') +
+      '</div>';
+
+    const levels = Object.keys(sum.byLevel || {}).map(k => {
+      const v = sum.byLevel[k];
+      return '<tr><td>' + tag(k, btLevelCls(k)) + '</td><td>' + E(v.total) + '</td><td>' + E(v.completed) + '</td>' +
+        '<td><b>' + (v.winRate === null ? '—' : v.winRate + '%') + '</b></td><td>' + btPct(v.avgReturn) + '</td>' +
+        '<td>' + E(v.stopped) + '</td></tr>';
+    }).join('');
+    const levelTbl = '<div class="bt-block"><div class="bt-h5">按结论档位分组（可检验评分档位是否真有区分度）</div>' +
+      '<div class="tbl-wrap"><table class="tbl bt-tbl"><thead><tr><th>档位</th><th>样本</th><th>已完结</th><th>成功率</th><th>平均收益</th><th>止损数</th></tr></thead>' +
+      '<tbody>' + (levels || '<tr><td colspan="6" class="muted">无样本</td></tr>') + '</tbody></table></div></div>';
+
+    const detail = rows.slice(0, 100).map(r => {
+      const o = r.outcome || {};
+      return '<tr><td>' + E(btDateLabel(r.date)) + '</td>' +
+        '<td><b>' + E(r.name) + '</b><br><span class="code">' + E(r.code) + '</span></td>' +
+        '<td>' + tag(r.level, btLevelCls(r.level)) + '</td><td>' + E(r.score) + '</td>' +
+        '<td>' + N(o.entry) + '</td><td>' + N(o.target) + '</td><td>' + N(o.stop) + '</td>' +
+        '<td class="small">' + (o.windowHigh === null || o.windowHigh === undefined ? '—' : N(o.windowHigh) + ' / ' + N(o.windowLow)) + '</td>' +
+        '<td>' + btResultTag(o.result) + (o.hitDay ? '<span class="small muted"> 第' + E(o.hitDay) + '日</span>' : '') + '</td>' +
+        '<td>' + PC(o.returnPct) + '</td><td class="small">' + E(r.klineSource || '—') + '</td></tr>';
+    }).join('');
+    const detailTbl = '<div class="bt-block"><div class="bt-h5">逐只明细（' + E(rows.length) + ' 条' +
+      (rows.length > 100 ? '，仅显示前 100 条' : '') + '）</div>' +
+      '<div class="tbl-wrap bt-detail"><table class="tbl bt-tbl"><thead><tr>' +
+      '<th>基准日</th><th>标的</th><th>档位</th><th>评分</th><th>基准价</th><th>目标</th><th>止损</th>' +
+      '<th>后续高/低</th><th>结果</th><th>收益</th><th>日K口径</th></tr></thead><tbody>' +
+      (detail || '<tr><td colspan="11" class="muted">该基准日没有可判定的样本（上游数据不足或全部被规则过滤）</td></tr>') +
+      '</tbody></table></div></div>';
+
+    const meth = (j.methodology || {});
+    const method = '<div class="bt-method" style="display:' + (S.btMethodOpen ? '' : 'none') + '">' +
+      (meth.rules || []).map(r => '<div class="pb-step"><b>' + E(r.name) + '</b><span>' + E(r.text) + '</span></div>').join('') +
+      '<div class="note-box">' + E(meth.caveat || '') + '</div></div>';
+    const skips = Object.keys(m.skipped || {}).map(k => E(k) + ' ' + E(m.skipped[k])).join('；') || '无';
+    const trace = '<div class="bt-trace small muted">' +
+      '历史涨停池：' + E((m.historyRange || []).join(' ~ ')) + '（' + E(m.historyDays) + ' 个交易日，仅可回溯约 15 日）· ' +
+      '计划组合 ' + E(m.plannedCount) + ' 个 → 去重 ' + E(m.codesRequested) + ' 只 → 日K成功 ' + E(m.klineOk) + ' 只 · ' +
+      '日K口径：' + E((m.klineSources || []).join(' / ') || '未取得') + ' · 服务端耗时 ' + E(m.elapsedMs) + ' ms<br>' +
+      '被规则跳过：' + skips + '<br>' + E(m.dataSourceNote || '') +
+      '<br>以上为历史回放，不构成投资建议；市场有风险，投资需谨慎。</div>';
+
+    return head + controls + warn + fb + kpis + btTrendSvg(j.days) + levelTbl + detailTbl +
+      '<button class="link-btn" id="btMethod2" style="margin-top:8px">' + (S.btMethodOpen ? '收起' : '查看') + '口径说明</button>' +
+      method + trace;
+  }
+
+  function refreshBtCard() {
+    if ($('btCard')) $('btCard').innerHTML = btCardInner();
+    if ($('btToggle')) $('btToggle').onclick = () => { S.btOpen = !S.btOpen; refreshBtCard(); };
+    if ($('btDate')) $('btDate').onchange = e => { S.btDate = e.target.value; refreshBtCard(); };
+    if ($('btWindow')) $('btWindow').onchange = e => { S.btWindow = Number(e.target.value); loadBacktest(false); };
+    if ($('btReload')) $('btReload').onclick = () => loadBacktest(true);
+    if ($('btRetry')) $('btRetry').onclick = () => loadBacktest(true);
+    if ($('btMethod')) $('btMethod').onclick = () => { S.btMethodOpen = !S.btMethodOpen; refreshBtCard(); };
+    if ($('btMethod2')) $('btMethod2').onclick = () => { S.btMethodOpen = !S.btMethodOpen; refreshBtCard(); };
+    if (S.btOpen && !S.bt && !S.btLoading && !S.btError) loadBacktest(false);
+  }
+
+  async function loadBacktest(force) {
+    if (S.btLoading) return;
+    S.btLoading = true; S.btError = null;
+    refreshBtCard();
+    const q = new URLSearchParams({ window: String(S.btWindow), days: '10' });
+    if (force) q.set('force', '1');
+    let j = null, lastErr = null;
+    try {
+      for (let i = 0; i < 3; i++) {
+        try {
+          const r = await fetch('/api/backtest?' + q.toString(), { cache: 'no-store' });
+          let data;
+          try { data = await r.json(); }
+          catch (_) { throw new Error('服务返回了非 JSON 响应（HTTP ' + r.status + '）'); }
+          if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
+          j = data; break;
+        } catch (e) {
+          lastErr = e;
+          if (!isConnError(e) || i === 2) break;
+          await new Promise(res => setTimeout(res, 1000 + i * 1200));
+        }
+      }
+      if (!j) throw lastErr || new Error('未知错误');
+      S.bt = j;
+      if (S.btDate !== 'all' && !(j.meta.baseDates || []).includes(S.btDate)) S.btDate = 'all';
+    } catch (e) { S.btError = e.message; }
+    finally { S.btLoading = false; refreshBtCard(); }
+  }
+
   /* 连接级失败（例如服务正在重启）自动重试；服务端 / 上游错误立即返回，不重复打上游 */
   async function fetchPullbackJson(q) {
     let lastErr;
@@ -625,6 +792,7 @@
     const q = new URLSearchParams();
     ['board', 'capMin', 'capMax', 'pctMin', 'pctMax', 'turnoverMin', 'turnoverMax', 'excludeST', 'keyword', 'sector', 'sort', 'limit']
       .forEach(k => { if (f[k] !== '' && f[k] !== undefined) q.set(k, f[k]); });
+    q.set('days', String(S.pullDays));
     if (force) q.set('force', '1');
     try {
       const j = await fetchPullbackJson(q);
@@ -672,6 +840,9 @@
       ' 只 · 服务端耗时 ' + E(m.elapsedMs) + ' ms · 生成时点 ' + E(m.generatedAt) + '</div>' +
       warn +
       '<div class="pb-actions"><button class="btn btn-primary" id="pbRescan">重新扫描</button> ' +
+      '<label class="small muted">候选回溯 <select class="sel" id="pbDays">' +
+      [8, 10, 15].map(n => '<option value="' + n + '"' + (S.pullDays === n ? ' selected' : '') + '>近 ' + n + ' 个交易日</option>').join('') +
+      '</select></label> ' +
       '<button class="btn" id="pbMethod">' + (S.pullMethodOpen ? '收起' : '查看') + '划线口径说明</button> ' +
       '<span class="small muted">本模块应用：市场板块 / 流通市值 / 涨跌幅 / 换手 / 排除ST / 关键字 / 板块筛选；「最低连板数」不适用于回调结构。</span></div></div>';
 
@@ -702,8 +873,10 @@
       : empty;
     const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
 
-    $('pane-pullback').innerHTML = head + source + method + body + disc;
+    $('pane-pullback').innerHTML = head + source + '<div class="card pad bt-card" id="btCard"></div>' + method + body + disc;
+    refreshBtCard();
     if ($('pbRescan')) $('pbRescan').onclick = () => loadPullback(true);
+    if ($('pbDays')) $('pbDays').onchange = e => { S.pullDays = Number(e.target.value); loadPullback(true); };
     if ($('pbMethod')) $('pbMethod').onclick = () => {
       S.pullMethodOpen = !S.pullMethodOpen;
       $('pbMethodBox').style.display = S.pullMethodOpen ? '' : 'none';

@@ -279,3 +279,30 @@ ul.tight li{margin-bottom:2px}
 .pb-empty{padding:34px}
 @media(max-width:1280px){.pb-kv-grid{grid-template-columns:repeat(2,1fr)}.lv-grid,.pb-plan-grid{grid-template-columns:1fr}}
 @media(max-width:1000px){.pb-layout{grid-template-columns:1fr}.pb-list{position:static;max-height:320px}.pb-ma{grid-template-columns:1fr}}
+
+/* 历史回溯 · 成功率验证 */
+.bt-card{margin-bottom:14px}
+.bt-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.bt-head h4{font-size:13px;margin-bottom:4px}
+.bt-controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0 12px;padding-top:12px;border-top:1px solid var(--line2)}
+.bt-controls label{font-size:11.5px;color:var(--ink2);display:flex;align-items:center;gap:6px}
+.bt-state{padding:22px;text-align:center;color:var(--ink2);background:#fbfcfe;border:1px dashed var(--line);border-radius:8px;font-size:12.5px}
+.bt-state.err{color:#8a5300;background:var(--warn-bg);border-color:#f4d7a6;text-align:left;line-height:1.75}
+.bt-warn{background:var(--warn-bg);border:1px solid #f4d7a6;color:#8a5300;padding:9px 12px;border-radius:7px;font-size:11.5px;line-height:1.7;margin-bottom:12px}
+.bt-kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin-bottom:14px}
+.bt-kpi{background:#fbfcfe;border:1px solid var(--line2);border-radius:8px;padding:9px 11px;min-height:70px}
+.bt-kpi .lbl{display:block;font-size:10.5px;color:var(--muted)}
+.bt-kpi b{display:block;font-size:19px;line-height:1.35;font-variant-numeric:tabular-nums}
+.bt-trend{margin:6px 0 14px;border:1px solid var(--line2);border-radius:8px;padding:10px 12px;background:#fff}
+.bt-trend svg{display:block}
+.bt-h5{font-size:11.5px;font-weight:700;color:var(--blue);margin:10px 0 7px}
+.bt-block{margin-top:12px}
+.bt-detail{max-height:420px;overflow:auto}
+.bt-tbl{font-size:11.5px;white-space:nowrap}
+.bt-tbl th{position:sticky;top:0;background:#f7f9fc;z-index:1}
+.bt-result{font-weight:700}
+.bt-result.blue{color:var(--blue2)}
+.bt-method{margin-top:10px;border-top:1px dashed var(--line2);padding-top:8px}
+.bt-trace{margin-top:12px;border-top:1px dashed var(--line2);padding-top:8px;line-height:1.75}
+@media(max-width:1280px){.bt-kpi-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.bt-kpi-grid{grid-template-columns:repeat(2,1fr)}.bt-trend svg{height:130px}}
