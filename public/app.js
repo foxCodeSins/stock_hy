@@ -15,13 +15,20 @@
   const src = s => '<span class="src">来源：' + E(s) + '</span>';
   const TICK = m => m.quoteTick || m.universeTick || (m.now ? m.now.slice(11, 16) : '—');
 
+  /* 「连不上本地服务」与「上游数据源不可用」是两类完全不同的故障，提示不能混为一谈 */
+  const SERVICE_HINT = '本地服务未响应：请确认 A股实时复盘系统已启动（双击项目目录 start.bat，或在项目目录运行 node server.js）；默认端口 8899，被占用时会自动顺延，请以控制台输出的「本机访问」地址为准。';
+  function isConnError(e) {
+    return e instanceof TypeError ||
+      /Failed to fetch|fetch failed|NetworkError|Load failed|ECONNREFUSED|ECONNRESET/i.test(String((e && e.message) || e));
+  }
+
   const S = {
     data: null, prevPrices: {}, tab: 'review', boards: new Set(['全部']),
     freq: 15, tick: 0, timer: null, boardsList: null,
     collapsed: new Set(), expanded: new Set(), chartsReady: !!window.echarts,
     lastFilters: '',
     pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
-    pullFilters: '', pullError: null, pullMethodOpen: false
+    pullFilters: '', pullError: null, pullMethodOpen: false, pullOfflineTimer: null
   };
   const activeHealth = m => (m.health || []).filter(h => !h.standby);
 
@@ -164,7 +171,10 @@
     } catch (e) {
       $('loading').classList.add('hide');
       $('alertBox').style.display = '';
-      $('alertBox').textContent = '数据加载失败：' + e.message + '。可点击「立即刷新」重试；若上游接口临时不可用，系统会在恢复后自动重新拉取。';
+      $('alertBox').textContent = '数据加载失败：' + e.message + '。' +
+        (isConnError(e)
+          ? SERVICE_HINT + ' 可点击「立即刷新」重试。'
+          : '可点击「立即刷新」重试；若上游接口临时不可用，系统会在恢复后自动重新拉取。');
     } finally {
       $('btnRefresh').disabled = false;
       S.tick = 0;
@@ -573,6 +583,40 @@
   }
   const pbKv = (k, v) => '<div class="pb-kv"><span>' + E(k) + '</span><b>' + v + '</b></div>';
 
+  /* 连接级失败（例如服务正在重启）自动重试；服务端 / 上游错误立即返回，不重复打上游 */
+  async function fetchPullbackJson(q) {
+    let lastErr;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await fetch('/api/pullback?' + q.toString(), { cache: 'no-store' });
+        let j;
+        try { j = await r.json(); }
+        catch (_) { throw new Error('服务返回了非 JSON 响应（HTTP ' + r.status + '），请确认访问的是本系统地址'); }
+        if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+        return j;
+      } catch (e) {
+        lastErr = e;
+        if (!isConnError(e) || i === 2) break;
+        if (!S.pull) $('pane-pullback').innerHTML = '<div class="card empty">本地服务未响应，正在重连…（第 ' + (i + 1) + ' 次）</div>';
+        await new Promise(res => setTimeout(res, 1000 + i * 1200));
+      }
+    }
+    throw lastErr;
+  }
+
+  /* 服务离线期间每 3 秒探测健康接口，恢复后自动重新扫描，无需手动刷新页面 */
+  function watchService() {
+    clearTimeout(S.pullOfflineTimer);
+    const probe = async () => {
+      try {
+        const h = await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' });
+        if (h.ok) { S.pullOfflineTimer = null; loadPullback(false); return; }
+      } catch (_) { /* 服务尚未就绪，继续探测 */ }
+      S.pullOfflineTimer = setTimeout(probe, 3000);
+    };
+    S.pullOfflineTimer = setTimeout(probe, 3000);
+  }
+
   async function loadPullback(force) {
     if (S.pullLoading) return;
     S.pullLoading = true;
@@ -583,22 +627,25 @@
       .forEach(k => { if (f[k] !== '' && f[k] !== undefined) q.set(k, f[k]); });
     if (force) q.set('force', '1');
     try {
-      const r = await fetch('/api/pullback?' + q.toString(), { cache: 'no-store' });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error);
+      const j = await fetchPullbackJson(q);
+      clearTimeout(S.pullOfflineTimer); S.pullOfflineTimer = null;
       S.pull = j; S.pullAt = Date.now(); S.pullFilters = describeFilters(f); S.pullError = null;
       const list = j.list || [];
       if (!list.some(x => x.code === S.pullSelected)) S.pullSelected = list.length ? list[0].code : null;
       renderPullback();
       $('badgePull').textContent = list.length;
     } catch (e) {
+      const conn = isConnError(e);
       S.pullError = e.message;
       S.pullAt = Date.now();   // 失败后防抖，避免自动刷新每 15 秒重复打上游
       $('pane-pullback').innerHTML =
-        '<div class="card empty">划线数据加载失败：' + E(e.message) +
-        '<br><span class="small muted">可点击「重新扫描」重试；上游接口临时不可用时，系统不会填充任何推测数据。</span></div>' +
+        '<div class="card empty">' + (conn ? '无法连接本地服务' : '划线数据加载失败') + '：' + E(e.message) +
+        '<br><span class="small muted">' + E(conn
+          ? SERVICE_HINT + ' 服务恢复后页面会自动重新扫描，也可点击「重新扫描」立即重试；系统不会用推测数据填充列表。'
+          : '可点击「重新扫描」重试；上游接口临时不可用时，系统不会填充任何推测数据。') + '</span></div>' +
         '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="pbRetry">重新扫描</button></div>';
       if ($('pbRetry')) $('pbRetry').onclick = () => loadPullback(true);
+      if (conn) watchService();
     } finally { S.pullLoading = false; }
   }
 
