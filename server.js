@@ -1,13 +1,16 @@
 'use strict';
 /**
  * A股实时复盘与短线机会系统 —— 本地服务（Node.js 零第三方依赖）
- * 启动： node server.js   →   http://localhost:8787
+ * 启动： node server.js   →   http://localhost:8899
  *
  * 所有行情均为免费公开接口实时拉取，服务端不内置、不缓存任何历史行情数字。
  */
 const http = require('http');
+const https = require('https');
+const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
+dns.setDefaultResultOrder('ipv4first');
 
 const ds = require('./lib/datasource');
 const an = require('./lib/analytics');
@@ -20,6 +23,71 @@ const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 
 const DISCLAIMER = '以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。';
+
+/* ─────────── 可选大模型配置（仅存内存：不落盘、不写日志、不回传密钥） ─────────── */
+const aiConfig = { baseUrl: '', apiKey: '', model: '' };
+const AI_SYSTEM_PROMPT = '你是严谨的 A 股短线复盘研究助手。严格遵守：1) 只能使用用户消息中提供的行情数据，禁止编造任何数字、公司、事件、新闻、政策或研报；2) 不预测指数涨跌方向，不使用「必涨/必跌」等绝对表述；3) 不给出具体买卖价位、仓位指令或收益承诺；4) 每个结论都要点明依据的数据字段；5) 明确指出数据边界（未接入新闻/公告/龙虎榜、非交易所官方推送）。输出用简体中文，结构清晰、克制、可执行的是观察框架而非交易指令。';
+
+function aiStatus() {
+  return {
+    configured: !!(aiConfig.baseUrl && aiConfig.apiKey),
+    model: aiConfig.model || null,
+    baseUrl: aiConfig.baseUrl || null
+  };
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => { chunks.push(c); if (Buffer.concat(chunks).length > 128 * 1024) reject(new Error('请求体过大')); });
+    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+
+function postJson(url, headers, payload, timeout = 45000) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return reject(e); }
+    if (!/^https?:$/.test(u.protocol)) return reject(new Error('仅支持 http/https 接口'));
+    const data = Buffer.from(JSON.stringify(payload), 'utf8');
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request({
+      hostname: u.hostname, port: u.port || undefined, path: u.pathname + u.search,
+      method: 'POST', family: 4, timeout,
+      headers: Object.assign({ 'Content-Type': 'application/json', 'Content-Length': data.length }, headers)
+    }, res => {
+      const cs = [];
+      res.on('data', c => cs.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(cs).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error('上游 HTTP ' + res.statusCode + '：' + text.slice(0, 300)));
+        try { resolve(JSON.parse(text)); } catch (e) { reject(new Error('上游返回非 JSON：' + text.slice(0, 200))); }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('大模型响应超时')));
+    req.on('error', reject);
+    req.end(data);
+  });
+}
+
+/** 只把真实行情数据摘要喂给模型，避免模型凭空补数据 */
+function buildAiPrompt(d) {
+  const ov = d.overview, rv = d.review;
+  const lines = [];
+  lines.push('【数据边界】以下均为免费公开接口快照，非交易所官方推送；未接入新闻/公告/龙虎榜；不构成投资建议。');
+  lines.push(`【时点】交易日 ${d.meta.poolDate}；腾讯实时快照 ${d.meta.quoteTick || '—'}；新浪全市场快照 ${d.meta.universeTick || '—'}；交易状态 ${d.meta.state}。`);
+  lines.push(`【市场】档位「${ov.tier}」/情绪「${ov.emotion}」；${ov.up} 涨 / ${ov.down} 跌，广度 ${ov.breadth}%；涨幅≥5% ${ov.up5} 家、跌幅≥5% ${ov.down5} 家；指数均值 ${ov.idxAvg}%。`);
+  lines.push(`【指数】${(ov.indices || []).map(i => i.name + ' ' + i.price + ' (' + (i.pct > 0 ? '+' : '') + i.pct + '%)').join('；')}`);
+  lines.push(`【涨停结构】涨停 ${ov.limitUp}、跌停 ${ov.limitDown}、炸板 ${ov.broken}（炸板率 ${ov.breakRate}%）、最高 ${ov.maxBoard} 板、梯队 ${Object.keys(ov.ladder).sort((a, b) => b - a).map(b => b + '板×' + ov.ladder[b]).join('/')}、${ov.gap ? '有断层' : '无断层'}。`);
+  lines.push(`【主线题材 Top5】${(d.themes || []).slice(0, 5).map(t => `${t.name}：${t.count} 只涨停 / 最高 ${t.maxBoard} 板 / ${t.stage} / 预期${t.outlook} / 炸板率 ${t.negRate}%`).join('；')}`);
+  lines.push(`【明日接力候选（前12）】${((d.relay && d.relay.list) || []).slice(0, 12).map(x => `${x.name}(${x.code}) ${x.category} ${x.boards}板 评分${x.relayScore} ${x.level} 方式「${x.method.method}」题材${x.theme ? x.theme.name + '/' + x.theme.stage : '无'}`).join('；')}`);
+  lines.push(`【连板低吸研判（前8）】${(d.lowbuy || []).slice(0, 8).map(x => `${x.name}(${x.code}) ${x.boards}板 技术${x.techScore} ${x.verdict.level} ${x.role.role} 题材预期${x.theme ? x.theme.outlook : '—'}`).join('；')}`);
+  lines.push(`【短线评分 Top8】${(d.picks || []).slice(0, 8).map(x => `${x.name}(${x.code}) 评分${x.score} ${x.verdict} 涨幅${x.pct}% 换手${x.turnover}%`).join('；')}`);
+  lines.push(`【已有复盘结论】${(rv && rv.facts ? rv.facts.map(f => f.label + '：' + f.value).join('；') : '')}`);
+  lines.push('【输出要求】按 1 市场状态判断（含依据字段）2 主线题材与生命周期 3 明日最值得观察的 3 个变量 4 候选标的分层（重点观察/条件观察/回避）及理由 5 风险清单与失效条件 输出；不要新增任何未给出的数据。');
+  return lines.join('\n');
+}
 
 /* ─────────── 交易状态（北京时间口径） ─────────── */
 function beijingNow() {
@@ -71,7 +139,8 @@ function serveStatic(req, res, urlPath) {
 }
 
 /* ─────────── 数据聚合 ─────────── */
-const dashCache = { at: 0, value: null, inflight: null };
+const dashCache = { at: 0, value: null, key: '' };
+const dashInflight = new Map();
 
 async function limitedMap(items, limit, fn) {
   const out = new Array(items.length);
@@ -129,21 +198,26 @@ async function buildDashboard(query) {
     ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14)
     : null;
 
-  // 5) 连板股日K（技术指标）
-  const lbCodes = (pools.zt || []).filter(x => (x.boards || 1) >= 2).slice(0, 25).map(x => x.code);
-  const klines = await limitedMap(lbCodes, 8, async c => ds.getKline(c, 90));
+  // 5) 涨停池个股日K（技术指标 / 反包板识别 / 接力评分共用；上游缓存 5 分钟）
+  const ztCodes = (pools.zt || []).slice(0, 45).map(x => x.code);
+  const klines = await limitedMap(ztCodes, 5, async c => ds.getKline(c, 90));
   const klineMap = {};
-  lbCodes.forEach((c, i) => { klineMap[c] = klines[i] || []; });
+  ztCodes.forEach((c, i) => { klineMap[c] = klines[i] || []; });
 
   const ctx = { ov, themes, sectorSet };
   const filtersWithSet = { ...f, _sectorSet: sectorSet };
 
-  // 6) 四大模块
+  // 6) 六个模块
   const [picks, lowbuy, opps] = await Promise.all([
     Promise.resolve(an.shortTermPicks(pools, universe, quotes, ctx, f)),
     Promise.resolve(an.boardLowBuy(pools, ov, themes, klineMap, quotes, filtersWithSet)),
     Promise.resolve(an.liveOpportunities(pools, boards, universe, quotes, filtersWithSet))
   ]);
+  const relay = an.relayPicks(pools, ov, themes, klineMap, quotes, filtersWithSet);
+  const ai = an.aiResearch({
+    ov, themes, review, picks, lowbuy, relay,
+    meta: { universeTick: universe.ticktime, quoteTick, poolDate: pools.date }
+  });
 
   const meta = {
     ...beijingNow(),
@@ -157,31 +231,36 @@ async function buildDashboard(query) {
     quoteTick,
     quoteCount: Object.keys(quotes).length,
     klineCount: Object.values(klineMap).filter(a => a && a.length).length,
+    klineSource: ds.getKlineSource(),
     sectorLabel,
     filters: f,
     sources: Object.values(ds.SOURCE_META).map(s => ({ label: s.label, host: s.host })),
     health: ds.getHealth(),
     port: ACTIVE_PORT,
+    aiConfigured: aiStatus().configured,
+    aiModel: aiStatus().model,
     dataSourceNote: '全市场广度=新浪财经行情中心；实时快照/指数=腾讯证券行情；日K(前复权)=腾讯证券；涨停/炸板/强势/跌停池与连板数、封单、行业=东方财富涨停池。均为免费公开接口，非交易所官方推送，盘中可能有秒级延迟。',
     disclaimer: DISCLAIMER
   };
 
-  return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, boards };
+  return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, boards, relay, ai };
 }
 
 async function getDashboard(query, force) {
   const now = Date.now();
   const key = JSON.stringify(query);
   if (!force && dashCache.value && dashCache.key === key && now - dashCache.at < 9000) return dashCache.value;
-  if (dashCache.inflight) return dashCache.inflight;
-  dashCache.inflight = (async () => {
+  // 不同筛选条件各自持有 inflight，避免并发请求串数据
+  if (dashInflight.has(key)) return dashInflight.get(key);
+  const p = (async () => {
     try {
       const v = await buildDashboard(query);
       dashCache.value = v; dashCache.key = key; dashCache.at = Date.now();
       return v;
-    } finally { dashCache.inflight = null; }
+    } finally { dashInflight.delete(key); }
   })();
-  return dashCache.inflight;
+  dashInflight.set(key, p);
+  return p;
 }
 
 /* ─────────── 路由 ─────────── */
@@ -190,7 +269,45 @@ const server = http.createServer(async (req, res) => {
   const q = Object.fromEntries(u.searchParams.entries());
   try {
     if (u.pathname === '/api/dashboard') return sendJson(res, await getDashboard(q, q.force === '1'));
-    if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), disclaimer: DISCLAIMER });
+    if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), ai: aiStatus(), disclaimer: DISCLAIMER });
+    if (u.pathname === '/api/ai/status') return sendJson(res, aiStatus());
+    if (u.pathname === '/api/ai/config' && req.method === 'POST') {
+      const b = await readJsonBody(req);
+      if (b.clear) {
+        aiConfig.baseUrl = ''; aiConfig.apiKey = ''; aiConfig.model = '';
+      } else {
+        const base = String(b.baseUrl || '').trim();
+        const key = String(b.apiKey || '').trim();
+        if (!/^https?:\/\//i.test(base)) return sendJson(res, { error: '接口地址需以 http:// 或 https:// 开头' }, 400);
+        if (!key) return sendJson(res, { error: 'API Key 不能为空' }, 400);
+        aiConfig.baseUrl = base.replace(/\/+$/, '');
+        aiConfig.apiKey = key;
+        aiConfig.model = String(b.model || 'gpt-4o-mini').trim();
+      }
+      return sendJson(res, { ok: true, ...aiStatus() });
+    }
+    if (u.pathname === '/api/ai/analyze' && req.method === 'POST') {
+      const st = aiStatus();
+      if (!st.configured) return sendJson(res, { error: '未配置大模型，当前展示的是本地量化研判引擎结果' }, 400);
+      try {
+        const d = await getDashboard({}, false);
+        const out = await postJson(st.baseUrl + '/chat/completions',
+          { 'Authorization': 'Bearer ' + aiConfig.apiKey },
+          {
+            model: st.model, temperature: 0.3, max_tokens: 2200,
+            messages: [{ role: 'system', content: AI_SYSTEM_PROMPT }, { role: 'user', content: buildAiPrompt(d) }]
+          });
+        const text = out && out.choices && out.choices[0] && out.choices[0].message && out.choices[0].message.content;
+        if (!text) throw new Error('模型返回内容为空：' + JSON.stringify(out).slice(0, 300));
+        return sendJson(res, {
+          text, model: st.model, generatedAt: new Date().toISOString(),
+          basedOn: { poolDate: d.meta.poolDate, quoteTick: d.meta.quoteTick, universeTick: d.meta.universeTick },
+          caveat: '以上为大模型基于本页真实行情摘要生成的文本，可能包含不准确内容，请以数据表格与交易所公告为准；不构成投资建议。'
+        });
+      } catch (e) {
+        return sendJson(res, { error: '大模型调用失败：' + String(e && e.message || e) + '。可检查接口地址 / Key / 模型名，或继续使用本地量化研判引擎。' }, 502);
+      }
+    }
     if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
     if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());
     if (u.pathname === '/api/quotes') {
