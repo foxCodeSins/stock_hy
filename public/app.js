@@ -30,7 +30,11 @@
     pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
     pullFilters: '', pullError: null, pullMethodOpen: false, pullOfflineTimer: null, pullDays: 8,
     bt: null, btLoading: false, btError: null, btOpen: false,
-    btDate: 'all', btWindow: 5, btMethodOpen: false
+    btDate: 'all', btWindow: 5, btMethodOpen: false,
+    dg: null, dgLoading: false, dgError: null, dgAt: 0, dgSelected: null, dgFilters: '',
+    dgMethodOpen: false, dgValidationOpen: false,
+    dgOpts: { days: 12, showAll: 0, sort: 'score', sortDir: 'desc', role: '全部', limit: 60 },
+    dgOfflineTimer: null
   };
   const activeHealth = m => (m.health || []).filter(h => !h.standby);
 
@@ -73,7 +77,7 @@
     });
     loadBoards();
     const initTab = new URLSearchParams(location.search).get('tab');
-    if (initTab && ['review', 'picks', 'live', 'lowbuy', 'pullback'].indexOf(initTab) >= 0) switchTab(initTab);
+    if (initTab && ['review', 'picks', 'live', 'lowbuy', 'pullback', 'dragon'].indexOf(initTab) >= 0) switchTab(initTab);
     refresh(true);
     startTimer();
   }
@@ -168,6 +172,8 @@
       // 新模块走独立 API：仅在该 tab 可见、筛选变化或超过 60 秒时才重新扫描，避免拖累 15 秒主看板刷新
       if (S.tab === 'pullback' && Date.now() - S.pullAt > 12000 &&
         (S.pullFilters !== S.lastFilters || Date.now() - S.pullAt > 60000)) loadPullback(false);
+      if (S.tab === 'dragon' && Date.now() - S.dgAt > 12000 &&
+        (S.dgFilters !== S.lastFilters || Date.now() - S.dgAt > 60000)) loadDragon(false);
       $('loading').classList.add('hide');
       $('alertBox').style.display = 'none';
     } catch (e) {
@@ -199,8 +205,9 @@
   function switchTab(t) {
     S.tab = t;
     [...$('tabs').children].forEach(c => c.classList.toggle('active', c.dataset.tab === t));
-    ['review', 'picks', 'live', 'lowbuy', 'pullback'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
+    ['review', 'picks', 'live', 'lowbuy', 'pullback', 'dragon'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
     if (t === 'pullback' && !S.pull && !S.pullLoading) loadPullback(false);
+    if (t === 'dragon' && !S.dg && !S.dgLoading) loadDragon(false);
     setTimeout(() => { Object.values(S.charts || {}).forEach(c => { try { c.resize(); } catch (e) { } }); }, 60);
   }
 
@@ -772,12 +779,16 @@
   }
 
   /* 服务离线期间每 3 秒探测健康接口，恢复后自动重新扫描，无需手动刷新页面 */
-  function watchService() {
+  function watchService(kind) {
     clearTimeout(S.pullOfflineTimer);
     const probe = async () => {
       try {
         const h = await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' });
-        if (h.ok) { S.pullOfflineTimer = null; loadPullback(false); return; }
+        if (h.ok) {
+          S.pullOfflineTimer = null;
+          if (kind === 'dragon') loadDragon(false); else loadPullback(false);
+          return;
+        }
       } catch (_) { /* 服务尚未就绪，继续探测 */ }
       S.pullOfflineTimer = setTimeout(probe, 3000);
     };
@@ -1090,6 +1101,314 @@
       '<div class="kv"><span class="k">涨停日校验</span><span class="v">' + E(x.ztSourceNote) + '</span></div>' +
       '<div class="kv"><span class="k">市场档位</span><span class="v">' + E(m.marketTier || '—') + ' / ' + E(m.marketEmotion || '—') + '</span></div>' +
       '</div></div></div>';
+  }
+
+  /* ═══════════ 明日龙头 · 只做龙头 / 买在分歧卖在一致 ═══════════ */
+  const dgDtypeCls = d => ({ '良性分歧': 'red', '一致加速': 'warn', '恶性分歧': 'purple', '分歧偏弱': 'blue', '中性': '' }[d] || '');
+  const dgToneCls = t => ({ primary: 'red', warn: 'warn', blue: 'blue', muted: '' }[t] || '');
+  const dgBar = (v, cls) => '<div class="dg-bar"><i class="' + (cls || 'blue') + '" style="width:'
+    + Math.max(0, Math.min(100, Number(v) || 0)).toFixed(1) + '%"></i></div>';
+  const dgNum = (v, suffix) => (v === null || v === undefined) ? '—' : E(v) + (suffix || '');
+
+  function dgHead(j) {
+    const s = j.sentiment, su = j.summary;
+    return '<div class="conclusion card dg-head"><div class="lead">「只做龙头」把 ' + E(su.poolCount) +
+      ' 只涨停股收敛为 <b>' + E(su.leaderCount) + '</b> 只有明确定位的龙头 / 卡位标的；当前情绪 <b>' + E(s.phase) +
+      '</b>（温度 ' + E(s.temperature) + ' / 100，姿态：' + E(s.stance) + '），空间板高度 ' + E(s.maxBoards) + ' 板。' +
+      '<div class="dg-head-sub">核心命题：<b>买在分歧</b>（放量换手后等次日弱转强确认）、<b>卖在一致</b>（缩量加速不追高）。下面是<b>明日盘前观察清单</b>，不是买入名单。</div></div>' +
+      '<div class="tags">' + tag('涨停 ' + s.ztCount, 'red') +
+      tag('炸板率 ' + dgNum(s.brokenRate, '%'), 'warn') + tag('跌停 ' + s.dtCount, 'green') +
+      tag('最高 ' + s.maxBoards + ' 板', 'blue') +
+      tag('昨日连板溢价 ' + (s.prevPremium === null ? '—' : (s.prevPremium > 0 ? '+' : '') + s.prevPremium + '%'), s.prevPremium < 0 ? 'green' : 'red') +
+      tag('候选 ' + su.shown, 'purple') + '</div></div>';
+  }
+
+  function dgSource(j) {
+    const m = j.meta, o = S.dgOpts;
+    return '<div class="card pad dg-source">' +
+      '<div>数据溯源：东方财富涨停 / 炸板 / 跌停池（交易日 <b>' + E(m.poolDate) + '</b>）· 历史池近 <b>' +
+      E((m.historyDates || []).length) + '</b> 个交易日 · 昨日连板股今日溢价 = 腾讯证券实时快照（' +
+      E(m.quotesOk) + '/' + E(m.prevCodesCount) + ' 只，时点 ' + E(m.quoteTick || '—') + '）· 指数：腾讯证券</div>' +
+      '<div class="small muted">' + E(m.dataSourceNote) + ' · 生成 ' + E(m.generatedAt) + ' · 服务端耗时 ' + E(m.elapsedMs) + ' ms</div>' +
+      (m.empty ? '<div class="pb-warn">' + E(m.emptyReason) + '</div>' : '') +
+      (m.historyNote ? '<div class="small muted">口径：' + E(m.historyNote) + '</div>' : '') +
+      '<div class="dg-actions">' +
+      '<button class="btn btn-primary" id="dgReload">重新扫描</button> ' +
+      '<label class="small muted">范围 <select class="sel" id="dgShowAll">' +
+      '<option value="0"' + (Number(o.showAll) === 0 ? ' selected' : '') + '>仅龙头（只做龙头）</option>' +
+      '<option value="1"' + (Number(o.showAll) === 1 ? ' selected' : '') + '>全池对照（含后排）</option></select></label> ' +
+      '<label class="small muted">地位 <select class="sel" id="dgRole">' +
+      ['全部', '空间板', '题材龙', '卡位股', '容量中军', '后排/补涨', '孤立涨停'].map(r =>
+        '<option value="' + E(r) + '"' + (o.role === r ? ' selected' : '') + '>' + E(r) + '</option>').join('') +
+      '</select></label> ' +
+      '<label class="small muted">回溯 <select class="sel" id="dgDays">' +
+      [7, 10, 12, 15].map(n => '<option value="' + n + '"' + (Number(o.days) === n ? ' selected' : '') + '>近 ' + n + ' 日</option>').join('') +
+      '</select></label> ' +
+      '<label class="small muted">排序 <select class="sel" id="dgSort">' +
+      [['score', '观察优先级'], ['boards', '连板高度'], ['divergence', '分歧度'], ['consensus', '一致度'], ['amount', '成交额']]
+        .map(p => '<option value="' + p[0] + '"' + (o.sort === p[0] ? ' selected' : '') + '>' + E(p[1]) + '</option>').join('') +
+      '</select></label> ' +
+      '<button class="btn" id="dgMethod">' + (S.dgMethodOpen ? '收起' : '查看') + '打法口径</button>' +
+      '<span class="small muted">全局筛选（市值 / 板块 / ST / 关键字）同样作用于本模块</span></div></div>';
+  }
+
+  function dgSentimentCard(j) {
+    const s = j.sentiment;
+    const kpis = [
+      ['涨停家数', s.ztCount, '东财涨停池'], ['炸板家数', s.zbCount, '东财炸板池'],
+      ['炸板率', dgNum(s.brokenRate, '%'), '炸板/(涨停+炸板)'], ['跌停家数', s.dtCount, '东财跌停池'],
+      ['最高连板', s.maxBoards + ' 板', '空间板高度'],
+      ['昨日连板溢价', s.prevPremium === null ? '—' : (s.prevPremium > 0 ? '+' : '') + s.prevPremium + '%', '腾讯实时快照'],
+      ['昨日涨停晋级率', dgNum(s.promoteRate, '%'), '今日仍涨停占比']
+    ];
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>情绪温度计与高位反馈</h4>' +
+      src('东方财富涨停/炸板/跌停池 ' + s.date + ' · 腾讯实时快照 ' + (j.meta.quoteTick || '—')) + '</div>' +
+      '<div class="dg-kpi-grid">' + kpis.map(k =>
+        '<div class="dg-kpi"><span>' + E(k[0]) + '</span><b>' + E(k[1]) + '</b><em>' + E(k[2]) + '</em></div>').join('') + '</div>' +
+      '<div class="dg-temp"><div class="dg-temp-top"><span>情绪温度 <b>' + E(s.temperature) + '</b> / 100</span>' +
+      '<span>' + tag(s.phase, 'warn') + ' ' + tag('姿态：' + s.stance, 'blue') + '</span></div>' + dgBar(s.temperature, 'blue') +
+      '<div class="small muted">分档：≥70 主升 · 55~70 修复/进攻 · 42~55 高位震荡 · 28~42 分歧退潮 · &lt;28 冰点；高位负反馈强制降档</div></div>' +
+      (s.deteriorateNote ? '<div class="pb-warn">' + E(s.deteriorateNote) + '</div>' : '') +
+      '<div class="tbl-wrap dg-factor-tbl"><table><thead><tr><th>因子</th><th>实测值</th><th>得分</th><th>权重</th><th>口径</th></tr></thead><tbody>' +
+      (s.parts || []).map(p => '<tr><td>' + E(p.name) + '</td><td>' + E(p.value === null ? '—' : p.value) +
+        '</td><td>' + E(p.score) + '</td><td>' + E(p.weight) + '%</td><td class="small muted">' + E(p.detail) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
+      (s.idxNote ? '<div class="small muted" style="margin-top:8px">指数：' + E(s.idxNote) + '</div>' : '') +
+      '<div class="note-box">' + E(s.note) + '</div></div>';
+  }
+
+  function dgLadderCard(j) {
+    const s = j.sentiment;
+    const max = Math.max(1, ...j.ladder.map(l => l.count));
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>连板梯队与断层</h4>' +
+      src('东方财富涨停池 ' + s.date + ' · 连板数 lbc') + '</div>' +
+      (j.ladder || []).map(l =>
+        '<div class="dg-ladder-row"><span class="dg-lb">' + E(l.boards) + ' 板</span>' +
+        '<div class="dg-ladder-track"><i style="width:' + (l.count / max * 100).toFixed(1) + '%"></i></div>' +
+        '<b>' + E(l.count) + ' 家</b><span class="small muted">' + E(l.names.join('、') || '—') +
+        (l.codes.length < l.count ? ' 等' : '') + '</span></div>').join('') +
+      '<div class="note-box">梯队' + (s.ladderComplete ? '目前无断层（1~' + E(s.maxBoards) + ' 板均有标的）'
+        : '在 ' + E(s.gaps.join('/')) + ' 板出现断层，按龙头战法属于退潮信号') +
+      '；断层是退潮信号，梯队完整度决定卡位股逻辑是否成立。代表股最多显示 6 只。</div></div>';
+  }
+
+  function dgThemesCard(j) {
+    const rows = (j.themes || []).slice(0, 10);
+    const spark = t => {
+      const max = Math.max(1, ...t.series.map(s => s.count));
+      return '<div class="dg-spark" title="' + E(t.series.map(s => String(s.date).slice(4) + ':' + s.count + '家').join(' / ')) + '">' +
+        t.series.map(s => '<i style="height:' + Math.max(3, s.count / max * 22) + 'px"></i>').join('') + '</div>';
+    };
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>题材强度与生命周期</h4>' +
+      src('东财行业分类 hybk · 近 5 个交易日涨停家数（历史池）') + '</div>' +
+      (rows.length ? '<div class="tbl-wrap"><table><thead><tr><th>行业</th><th>涨停</th><th>最高板</th><th>阶段</th><th>强度</th><th>近 5 日家数</th></tr></thead><tbody>' +
+        rows.map(t => '<tr><td><b>' + E(t.industry) + '</b><div class="small muted">' + E(t.names.slice(0, 3).join('、')) + '</div></td>' +
+          '<td>' + E(t.count) + '</td><td>' + E(t.maxBoards) + ' 板</td><td>' + tag(t.stage, t.stage === '退潮' ? 'green' : t.stage === '高潮' ? 'warn' : 'blue') + '</td>' +
+          '<td><div class="dg-mini-bar">' + dgBar(t.strength, 'purple') + '<span>' + E(t.strength) + '</span></div></td>' +
+          '<td>' + spark(t) + '<div class="small muted">' + t.series.map(s => s.count).join('/') + '</div></td></tr>').join('') +
+        '</tbody></table></div>' : '<div class="card empty">当日无涨停行业数据</div>') +
+      '<div class="note-box">阶段由近 5 日该行业涨停家数序列、最高板变化与今日一字占比判定；东财行业分类较细，「孤立涨停」偏多是分类口径的结果，可能与市场俗称题材不同。</div></div>';
+  }
+
+  function dgValidationCard(j) {
+    const v = j.validation || {};
+    const emptyRate = () => ({ n: 0, promoted: 0, rate: null });
+    const line = (label, o, cls) => '<div class="dg-val-row"><span>' + E(label) + '</span><b>' + E(o.n) + '</b>' +
+      '<span class="small muted">晋级 ' + E(o.promoted) + '</span><b class="' + (cls || '') + '">' +
+      (o.rate === null ? '—' : o.rate + '%') + '</b>' + dgBar(o.rate || 0, cls === 'down' ? 'green' : 'blue') + '</div>';
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>历史验证 · 次日晋级率</h4>' +
+      src('东方财富历史涨停池近 ' + (j.meta.historyDates || []).length + ' 个交易日 · ' + (v.days || 0) + ' 组「基准日→次日」样本') + '</div>' +
+      '<div class="dg-val-grid"><div><div class="dg-h5">按一致 / 分歧分类</div>' +
+      line('全部龙头', v.overall || emptyRate()) + line('良性分歧', v.divergence || emptyRate()) + line('一致加速', v.consensus || emptyRate()) +
+      '</div><div><div class="dg-h5">按分歧度分组</div>' +
+      (v.byDivergenceBand || []).map(b => line(b.band, b)).join('') + '</div></div>' +
+      (v.insufficient ? '<div class="pb-warn">样本不足：良性分歧组与一致加速组至少一组样本 &lt;20，本模块只展示计数，不据此下结论，更不能反推「分歧无效」或「追一致更好」。</div>' : '') +
+      '<div class="note-box"><b>怎么读：</b>晋级率 = 次日再次涨停且连板数增加的比例，<b>不等于收益率或可交易胜率</b>。一字/秒板的一致加速股次日继续涨停概率天然更高，但往往买不进或只能涨停价成交；「卖在一致」讲的是赔率与兑现风险，不是「次日一定不涨」。</div>' +
+      '<div class="note-box">' + E(v.note || '') + '</div></div>';
+  }
+
+  function dgMethodCard(j) {
+    const m = j.methodology || {};
+    return '<div class="card pad dg-method" id="dgMethodBox" style="display:' + (S.dgMethodOpen ? '' : 'none') + '">' +
+      '<h4 style="font-size:13px;margin-bottom:9px">' + E(m.title || '打法口径') + '（先看规则，再看结论）</h4>' +
+      (m.rules || []).map(r => '<div class="pb-step"><b>' + E(r.name) + '</b><span>' + E(r.text) + '</span></div>').join('') +
+      '<div class="note-box">' + E(m.caveat || '') + '</div></div>';
+  }
+
+  function dgListItems(j) {
+    return (j.list || []).map(x =>
+      '<div class="dg-item' + (x.code === S.dgSelected ? ' active' : '') + '" data-code="' + E(x.code) + '">' +
+      '<div class="dg-item-top"><b>' + E(x.name) + '</b><span class="code muted">' + E(x.code) + '</span>' +
+      '<span class="tag ' + dgDtypeCls(x.dtype) + '">' + E(x.dtype) + '</span>' +
+      '<span class="dg-score">' + E(x.score) + '</span></div>' +
+      '<div class="dg-item-mid"><span>' + E(x.boards) + ' 板</span><span class="tag ' + (x.roleRank === 1 ? 'red' : 'blue') + '">' + E(x.role) + '</span>' +
+      '<span class="muted">' + E(x.industry) + '</span></div>' +
+      '<div class="dg-mini-meters"><span>一致 ' + E(x.consensus) + '</span>' + dgBar(x.consensus, 'blue') +
+      '<span>分歧 ' + E(x.divergence) + '</span>' + dgBar(x.divergence, 'red') + '</div>' +
+      '<div class="dg-item-bot">' + E(x.script.title) + '</div></div>').join('');
+  }
+
+  function dgDetailHead(x) {
+    return '<div class="card pad dg-detail-head"><div class="dg-dh-top"><h3>' + E(x.name) + ' <span class="muted" style="font-size:12px;font-weight:400">' + E(x.code) + '</span></h3>' +
+      tag(x.boards + ' 板', 'red') + tag(x.role, 'blue') + tag(x.dtype, dgDtypeCls(x.dtype)) +
+      tag('观察优先级 ' + x.score, 'purple') + '<span class="muted small">' + E(x.industry) + ' · ' + E(x.board) + '</span></div>' +
+      '<div class="dg-dh-reason"><b>地位依据：</b>' + E(x.roleReason) + '</div>' +
+      '<div class="dg-kv-grid">' +
+      dgKv('收盘价', N(x.price) + ' 元') + dgKv('当日涨幅', PC(x.pct)) +
+      dgKv('首次封板', E(x.firstSeal)) + dgKv('最后封板', E(x.lastSeal)) +
+      dgKv('炸板次数', E(x.brokenCount) + ' 次') + dgKv('封单/流通市值', N(x.sealFundRatio) + '%') +
+      dgKv('换手率', N(x.turnover) + '%') + dgKv('成交额', AMT(x.amount)) +
+      dgKv('流通市值', CAP(x.floatCap)) + dgKv('近期涨停', (x.statDays === null || x.statDays === undefined ? '—' : E(x.statDays) + ' 天 ' + E(x.statCount) + ' 板')) +
+      dgKv('封单额', AMT(x.sealFund)) + dgKv('所属题材阶段', x.theme ? E(x.theme.stage) + ' / 强度 ' + E(x.theme.strength) : '—') +
+      '</div><div class="dg-trace">' + src(x.sourceNote) + '</div></div>';
+  }
+  function dgKv(k, v) { return '<div class="dg-kv"><span>' + E(k) + '</span><b>' + v + '</b></div>'; }
+
+  function dgMeters(x) {
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>一致度 / 分歧度（0~100，全部由真实封板字段计算）</h4></div>' +
+      '<div class="dg-meter-block"><div class="dg-meter-top"><b>一致度 ' + E(x.consensus) + '</b>' +
+      '<span class="small muted">早封 + 零炸板 + 高封单比 + 低换手 = 筹码锁定</span></div>' + dgBar(x.consensus, 'blue') + '</div>' +
+      '<div class="dg-meter-block"><div class="dg-meter-top"><b>分歧度 ' + E(x.divergence) + '</b>' +
+      '<span class="small muted">炸板 + 换手 + 封板晚 + 封单弱 + 放量 = 筹码交换</span></div>' + dgBar(x.divergence, 'red') + '</div>' +
+      '<div class="note-box">' + E(x.benignRule) + '；当前判定：<b>' + E(x.dtype) + '</b>。</div>' +
+      '<div class="dg-factor-grid"><div><div class="dg-h5">一致度因子</div>' +
+      (x.consensusParts || []).map(p => '<div class="dg-factor"><span>' + E(p.name) + ' <em>权重' + E(p.weight) + '%</em></span>' +
+        '<b>' + E(p.got) + '</b>' + dgBar(p.got, 'blue') + '<small>' + E(p.detail) + '</small></div>').join('') +
+      '</div><div><div class="dg-h5">分歧度因子</div>' +
+      (x.divergenceParts || []).map(p => '<div class="dg-factor"><span>' + E(p.name) + ' <em>权重' + E(p.weight) + '%</em></span>' +
+        '<b>' + E(p.got) + '</b>' + dgBar(p.got, 'red') + '<small>' + E(p.detail) + '</small></div>').join('') +
+      '</div></div></div>';
+  }
+
+  function dgScriptCard(x) {
+    const sc = x.script || {};
+    return '<div class="card pad dg-card dg-script ' + (sc.tone || '') + '"><div class="dg-card-head">' +
+      '<h4>' + E(sc.title) + '</h4>' + tag('明日条件化剧本', dgToneCls(sc.tone)) + '</div>' +
+      '<div class="dg-thesis">' + E(sc.thesis) + '</div>' +
+      '<div class="dg-h5">触发条件 → 观察结论</div>' +
+      (sc.triggers || []).map((t, i) => '<div class="dg-trigger"><b>' + (i + 1) + '</b>' +
+        '<div><span class="dg-cond">若 ' + E(t.condition) + '</span><span class="dg-action">→ ' + E(t.action) + '</span></div></div>').join('') +
+      '<div class="dg-h5">失效条件 / 证伪信号</div><ul class="dg-list-plain">' +
+      (sc.invalidation || []).map(s => '<li>' + E(s) + '</li>').join('') + '</ul>' +
+      '<div class="dg-risk"><b>风险：</b>' + E(sc.risk) + '</div>' +
+      '<div class="dg-h5">明日需同步观察</div><ul class="dg-list-plain">' +
+      (x.watch || []).map(s => '<li>' + E(s) + '</li>').join('') + '</ul></div>';
+  }
+
+  function dgScoreCard(x) {
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>观察优先级评分明细</h4>' +
+      '<span class="small muted">满分 100 = 地位 30 + 分歧质量 25 + 题材 20 + 情绪 15 − 风险 10</span></div>' +
+      '<div class="tbl-wrap"><table><thead><tr><th>因子</th><th>得分</th><th>上限</th><th>依据</th></tr></thead><tbody>' +
+      (x.scoreParts || []).map(p => '<tr><td>' + E(p.name) + '</td><td><b>' + E(p.got) + '</b></td><td>' +
+        (p.max === 0 ? '扣减项' : E(p.max)) + '</td><td class="small muted">' + E(p.detail) + '</td></tr>').join('') +
+      '</tbody></table></div><div class="note-box">排序是「明日观察优先级」，不是收益预测，更不是买入建议；一致加速的一字板在此项会被扣分。</div></div>';
+  }
+
+  function renderDragonDetail() {
+    const j = S.dg; if (!j) return;
+    const box = $('dgDetail'); if (!box) return;
+    const x = (j.list || []).find(a => a.code === S.dgSelected);
+    if (!x) { box.innerHTML = '<div class="card empty">请选择左侧标的查看地位依据、一致/分歧拆解与明日剧本</div>'; return; }
+    box.innerHTML = dgDetailHead(x) + dgMeters(x) + dgScriptCard(x) + dgScoreCard(x);
+  }
+
+  function renderDragon() {
+    const j = S.dg; if (!j) return;
+    const s = j.sentiment, list = j.list || [];
+    const focus = '<div class="card pad dg-card"><div class="dg-card-head"><h4>明日 3 个核心变量</h4>' +
+      '<span class="small muted">由今日真实梯队 / 情绪 / 题材数据生成，不是预测</span></div>' +
+      (j.focus || []).map((f, i) => '<div class="dg-focus"><b>' + (i + 1) + '</b><span>' + E(f) + '</span></div>').join('') + '</div>';
+    const empty = '<div class="card empty dg-empty"><b>当前没有符合条件的龙头候选</b><br>' +
+      '<span class="small muted">' + (j.meta.empty ? E(j.meta.emptyReason)
+        : '「只做龙头」纪律下已剔除 ' + E((j.excluded || []).length) + ' 只后排 / 孤立涨停。可切换「全池对照」查看被剔除标的，或放宽地位筛选。系统不会用推测数据填充。') +
+      '</span></div>';
+    const body = list.length
+      ? '<div class="dg-layout"><div class="dg-list" id="dgList">' + dgListItems(j) + '</div>' +
+      '<div class="dg-detail" id="dgDetail"></div></div>'
+      : empty;
+    const excl = (j.excluded || []).length && Number(S.dgOpts.showAll) === 0
+      ? '<div class="card pad dg-card dg-excluded"><div class="dg-h5">「只做龙头」纪律剔除（' + E(j.excluded.length) + ' 只，仅作对照）</div>' +
+      '<div class="dg-excl-tags">' + j.excluded.slice(0, 18).map(x =>
+        '<span class="tag" title="' + E(x.roleReason) + '">' + E(x.name) + ' ' + E(x.boards) + '板 · ' + E(x.role) + '</span>').join('') +
+      (j.excluded.length > 18 ? '<span class="small muted">等共 ' + E(j.excluded.length) + ' 只</span>' : '') + '</div></div>' : '';
+    const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
+    $('pane-dragon').innerHTML = dgHead(j) + dgSource(j) + dgSentimentCard(j) +
+      '<div class="dg-grid2">' + dgLadderCard(j) + dgThemesCard(j) + '</div>' +
+      focus + dgValidationCard(j) + dgMethodCard(j) + body + excl + disc;
+
+    $('dgReload').onclick = () => loadDragon(true);
+    $('dgShowAll').onchange = e => { S.dgOpts.showAll = Number(e.target.value); loadDragon(true); };
+    $('dgRole').onchange = e => { S.dgOpts.role = e.target.value; loadDragon(true); };
+    $('dgDays').onchange = e => { S.dgOpts.days = Number(e.target.value); loadDragon(true); };
+    $('dgSort').onchange = e => { S.dgOpts.sort = e.target.value; loadDragon(true); };
+    $('dgMethod').onclick = () => {
+      S.dgMethodOpen = !S.dgMethodOpen;
+      $('dgMethodBox').style.display = S.dgMethodOpen ? '' : 'none';
+      $('dgMethod').textContent = (S.dgMethodOpen ? '收起' : '查看') + '打法口径';
+    };
+    $('pane-dragon').querySelectorAll('.dg-item').forEach(el => {
+      el.onclick = () => {
+        S.dgSelected = el.dataset.code;
+        $('pane-dragon').querySelectorAll('.dg-item').forEach(n => n.classList.toggle('active', n === el));
+        renderDragonDetail();
+      };
+    });
+    renderDragonDetail();
+  }
+
+  async function fetchDragonJson(q) {
+    let lastErr;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await fetch('/api/dragon?' + q.toString(), { cache: 'no-store' });
+        let j;
+        try { j = await r.json(); }
+        catch (_) { throw new Error('服务返回了非 JSON 响应（HTTP ' + r.status + '），请确认访问的是本系统地址'); }
+        if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+        return j;
+      } catch (e) {
+        lastErr = e;
+        if (!isConnError(e) || i === 2) break;
+        if (!S.dg) $('pane-dragon').innerHTML = '<div class="card empty">本地服务未响应，正在重连…（第 ' + (i + 1) + ' 次）</div>';
+        await new Promise(res => setTimeout(res, 1000 + i * 1200));
+      }
+    }
+    throw lastErr;
+  }
+
+  async function loadDragon(force) {
+    if (S.dgLoading) return;
+    S.dgLoading = true;
+    if (!S.dg) $('pane-dragon').innerHTML = '<div class="card empty">正在回溯涨停/炸板池、核对连板梯队与封板质量，生成明日观察清单…</div>';
+    const q = new URLSearchParams();
+    const o = S.dgOpts;
+    ['days', 'showAll', 'sort', 'sortDir', 'role', 'limit'].forEach(k => {
+      if (o[k] !== '' && o[k] !== undefined && o[k] !== null) q.set(k, o[k]);
+    });
+    // 复用全局筛选（与本模块相关的字段）
+    const f = collectFilters();
+    ['board', 'capMin', 'capMax', 'excludeST', 'keyword'].forEach(k => {
+      if (f[k] !== '' && f[k] !== undefined && f[k] !== null) q.set(k, f[k]);
+    });
+    if (force) q.set('force', '1');
+    try {
+      const j = await fetchDragonJson(q);
+      S.dg = j; S.dgAt = Date.now(); S.dgError = null; S.dgFilters = S.lastFilters;
+      const list = j.list || [];
+      if (!list.some(x => x.code === S.dgSelected)) S.dgSelected = list.length ? list[0].code : null;
+      renderDragon();
+      $('badgeDragon').textContent = list.length;
+    } catch (e) {
+      S.dgError = e.message;
+      const offline = isConnError(e);
+      $('badgeDragon').textContent = '—';
+      $('pane-dragon').innerHTML = '<div class="card empty"><b>明日龙头数据加载失败：' + E(e.message) + '</b><br>' +
+        '<span class="small muted">' + (offline ? E(SERVICE_HINT)
+          : '服务端或上游数据源返回异常；系统不会用推测数据填充，稍后可点下方按钮重试。') + '</span></div>' +
+        '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="dgRetry">重新扫描</button></div>';
+      $('dgRetry').onclick = () => loadDragon(true);
+      if (offline) watchService('dragon');
+    } finally { S.dgLoading = false; }
   }
 
   /* ─────────────── 页脚 ─────────────── */

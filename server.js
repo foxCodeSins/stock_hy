@@ -472,6 +472,82 @@ async function getBacktest(query, force) {
   return backtestCache.inflight;
 }
 
+/* ─────────── 明日龙头 · 只做龙头 / 买在分歧卖在一致 ─────────── */
+const dragonCache = { at: 0, key: '', value: null, inflight: null };
+
+async function buildDragon(query) {
+  const t0 = Date.now();
+  const f = { ...query };
+  delete f._; delete f.force;
+  const days = Math.min(15, Math.max(5, Number(f.days) || 12));
+
+  const [pools, history, indices] = await Promise.all([
+    ds.getPools().catch(() => ({ zt: [], zb: [], qs: [], dt: [], date: '' })),
+    ds.getPoolFullHistory(days).catch(() => ({ dates: [], byDate: {}, note: '' })),
+    ds.getIndices().catch(() => [])
+  ]);
+
+  // 上一交易日涨停股今日真实溢价：腾讯实时快照（历史池只提供名单，不提供今日涨跌）
+  const prevDate = (history.dates || [])[1] && history.dates[1].date;
+  const prevCodes = prevDate && history.byDate[prevDate]
+    ? [...new Set(history.byDate[prevDate].zt.map(x => x.code))] : [];
+  const quotes = prevCodes.length ? await ds.getQQQuotes(prevCodes).catch(() => ({})) : {};
+
+  const options = {
+    board: f.board, capMin: f.capMin, capMax: f.capMax, keyword: f.keyword,
+    excludeST: f.excludeST, sort: f.sort, sortDir: f.sortDir, limit: f.limit,
+    showAll: f.showAll, role: f.role, days
+  };
+  const g = an.dragonGame({ pools, history, quotes, indices, options });
+
+  const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
+  const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;
+  const quoteTick = latestQT && String(latestQT).length >= 14
+    ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14) : null;
+
+  const meta = {
+    ...beijingNow(),
+    generatedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - t0,
+    poolDate: pools.date || null,
+    prevPoolDate: prevDate || null,
+    prevCodesCount: prevCodes.length,
+    quotesOk: Object.keys(quotes).length,
+    quoteTick,
+    historyDates: history.dates || [],
+    historyNote: history.note || '',
+    health: ds.getHealth(), port: ACTIVE_PORT,
+    sources: Object.values(ds.SOURCE_META).map(s => ({ label: s.label, host: s.host, standby: !!s.standby })),
+    filters: options,
+    empty: !(pools.zt || []).length,
+    emptyReason: !(pools.zt || []).length
+      ? '东方财富涨停池当前返回空名单（可能是非交易时段、上游临时不可用或当日无涨停），系统不会用推测数据填充。'
+      : null,
+    dataSourceNote: g.metaNote + '；实时溢价快照时点 ' + (quoteTick || '—') + '；指数：腾讯证券。',
+    disclaimer: DISCLAIMER
+  };
+  return { meta, ...g };
+}
+
+async function getDragon(query, force) {
+  const key = JSON.stringify({
+    days: query.days || '', board: query.board || '', capMin: query.capMin || '',
+    capMax: query.capMax || '', keyword: query.keyword || '', excludeST: query.excludeST || '',
+    sort: query.sort || '', sortDir: query.sortDir || '', limit: query.limit || '',
+    showAll: query.showAll || '', role: query.role || ''
+  });
+  if (!force && dragonCache.value && dragonCache.key === key && Date.now() - dragonCache.at < 90000) return dragonCache.value;
+  if (dragonCache.inflight) return dragonCache.inflight;
+  dragonCache.inflight = (async () => {
+    try {
+      const v = await buildDragon(query);
+      dragonCache.value = v; dragonCache.key = key; dragonCache.at = Date.now();
+      return v;
+    } finally { dragonCache.inflight = null; }
+  })();
+  return dragonCache.inflight;
+}
+
 /* ─────────── 路由 ─────────── */
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost:' + ACTIVE_PORT);
@@ -480,6 +556,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/dashboard') return sendJson(res, await getDashboard(q, q.force === '1'));
     if (u.pathname === '/api/pullback') return sendJson(res, await getPullback(q, q.force === '1'));
     if (u.pathname === '/api/backtest') return sendJson(res, await getBacktest(q, q.force === '1'));
+    if (u.pathname === '/api/dragon') return sendJson(res, await getDragon(q, q.force === '1'));
     if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), disclaimer: DISCLAIMER });
     if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
     if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());
