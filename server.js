@@ -1,0 +1,247 @@
+'use strict';
+/**
+ * A股实时复盘与短线机会系统 —— 本地服务（Node.js 零第三方依赖）
+ * 启动： node server.js   →   http://localhost:8787
+ *
+ * 所有行情均为免费公开接口实时拉取，服务端不内置、不缓存任何历史行情数字。
+ */
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const ds = require('./lib/datasource');
+const an = require('./lib/analytics');
+
+// 默认 8899：8787 常与其它本地服务冲突；可用环境变量 PORT 覆盖
+// 若目标端口被占用，启动时自动顺延到下一个可用端口（最多 15 次），并在控制台打印实际地址
+const PREFERRED_PORT = Number(process.env.PORT) || 8899;
+let ACTIVE_PORT = PREFERRED_PORT;
+const ROOT = __dirname;
+const PUBLIC = path.join(ROOT, 'public');
+
+const DISCLAIMER = '以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。';
+
+/* ─────────── 交易状态（北京时间口径） ─────────── */
+function beijingNow() {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, weekday: 'short'
+  }).formatToParts(new Date()).reduce((a, p) => (a[p.type] = p.value, a), {});
+  const hm = Number(parts.hour) * 100 + Number(parts.minute);
+  const weekend = /周六|周日|Sat|Sun/.test(parts.weekday || '');
+  let state, note;
+  if (weekend) { state = '休市'; note = '周末休市，展示最近一个交易日收盘数据'; }
+  else if (hm < 915) { state = '盘前'; note = '未开盘，展示最近一个交易日收盘数据与复盘计划'; }
+  else if (hm < 930) { state = '集合竞价'; note = '集合竞价阶段，行情可能频繁变动'; }
+  else if (hm <= 1130) { state = '盘中'; note = '早盘交易时段'; }
+  else if (hm < 1300) { state = '午间休市'; note = '午间休市，行情为上午收盘快照'; }
+  else if (hm <= 1500) { state = '盘中'; note = '午盘交易时段'; }
+  else { state = '盘后'; note = '今日已收盘，数据为当日收盘快照'; }
+  return {
+    now: parts.year + '-' + parts.month + '-' + parts.day + ' ' + parts.hour + ':' + parts.minute + ':' + parts.second + ' (北京时间)',
+    date: parts.year + parts.month + parts.day,
+    weekday: parts.weekday, state, note,
+    caveat: '节假日未内置交易日历，如遇法定假日请以交易所公告为准'
+  };
+}
+
+/* ─────────── HTTP 工具 ─────────── */
+function sendJson(res, data, status = 200) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Content-Length': Buffer.byteLength(body)
+  });
+  res.end(body);
+}
+
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json; charset=utf-8' };
+
+function serveStatic(req, res, urlPath) {
+  let rel = decodeURIComponent(urlPath.split('?')[0]);
+  if (rel === '/' || rel === '') rel = '/index.html';
+  const full = path.resolve(PUBLIC, '.' + rel);
+  if (!full.startsWith(path.resolve(PUBLIC))) { res.writeHead(403); return res.end('Forbidden'); }
+  fs.readFile(full, (err, buf) => {
+    if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('404 Not Found: ' + rel); }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.end(buf);
+  });
+}
+
+/* ─────────── 数据聚合 ─────────── */
+const dashCache = { at: 0, value: null, inflight: null };
+
+async function limitedMap(items, limit, fn) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      try { out[i] = await fn(items[i], i); } catch (e) { out[i] = null; }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+async function buildDashboard(query) {
+  const t0 = Date.now();
+  const f = { ...query };
+  delete f._;
+
+  // 1) 四路数据并行
+  const [universe, pools, indices, boards] = await Promise.all([
+    ds.getUniverse().catch(() => ({ list: [], count: 0, asOf: new Date().toISOString() })),
+    ds.getPools().catch(() => ({ zt: [], qs: [], zb: [], dt: [], date: '', asOf: new Date().toISOString() })),
+    ds.getIndices().catch(() => []),
+    ds.getSectorBoards().catch(() => ({ industry: [], concept: [], asOf: new Date().toISOString() }))
+  ]);
+
+  // 2) 板块筛选解析（新浪板块成分股）
+  let sectorSet = null, sectorLabel = null;
+  if (f.sector && /^[A-Za-z0-9_]+$/.test(String(f.sector))) {
+    sectorSet = await ds.getSectorMembers(String(f.sector));
+    const all = [...(boards.industry || []), ...(boards.concept || [])];
+    const hit = all.find(b => b.node === f.sector);
+    sectorLabel = hit ? `${hit.kind === 'concept' ? '概念' : '行业'}·${hit.name}` : f.sector;
+    if (!sectorSet || !sectorSet.size) sectorSet = null;
+  }
+
+  // 3) 市场结构 / 题材 / 复盘
+  const ov = an.marketOverview(universe, indices, pools);
+  const themes = an.buildThemes(pools, boards);
+  const review = an.reviewPlan(ov, themes, pools);
+
+  // 4) 需要实时快照的代码池
+  const codeSet = new Set();
+  for (const k of ['zt', 'qs', 'zb', 'dt']) (pools[k] || []).forEach(x => codeSet.add(x.code));
+  // 全市场涨幅榜 / 成交额榜补充，用于筛选器覆盖非涨停标的
+  const uniSorted = [...(universe.list || [])].filter(x => x.pct !== null).sort((a, b) => b.pct - a.pct).slice(0, 40);
+  uniSorted.forEach(x => codeSet.add(x.code));
+  const codes = [...codeSet].slice(0, 400);
+  const quotes = await ds.getQQQuotes(codes).catch(() => ({}));
+  const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
+  const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;
+  const quoteTick = latestQT && String(latestQT).length >= 14
+    ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14)
+    : null;
+
+  // 5) 连板股日K（技术指标）
+  const lbCodes = (pools.zt || []).filter(x => (x.boards || 1) >= 2).slice(0, 25).map(x => x.code);
+  const klines = await limitedMap(lbCodes, 8, async c => ds.getKline(c, 90));
+  const klineMap = {};
+  lbCodes.forEach((c, i) => { klineMap[c] = klines[i] || []; });
+
+  const ctx = { ov, themes, sectorSet };
+  const filtersWithSet = { ...f, _sectorSet: sectorSet };
+
+  // 6) 四大模块
+  const [picks, lowbuy, opps] = await Promise.all([
+    Promise.resolve(an.shortTermPicks(pools, universe, quotes, ctx, f)),
+    Promise.resolve(an.boardLowBuy(pools, ov, themes, klineMap, quotes, filtersWithSet)),
+    Promise.resolve(an.liveOpportunities(pools, boards, universe, quotes, filtersWithSet))
+  ]);
+
+  const meta = {
+    ...beijingNow(),
+    generatedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - t0,
+    poolDate: pools.date || null,
+    poolQDate: pools.qdate || null,
+    universeCount: universe.count,
+    universeExpected: universe.expected,
+    universeTick: universe.ticktime,
+    quoteTick,
+    quoteCount: Object.keys(quotes).length,
+    klineCount: Object.values(klineMap).filter(a => a && a.length).length,
+    sectorLabel,
+    filters: f,
+    sources: Object.values(ds.SOURCE_META).map(s => ({ label: s.label, host: s.host })),
+    health: ds.getHealth(),
+    port: ACTIVE_PORT,
+    dataSourceNote: '全市场广度=新浪财经行情中心；实时快照/指数=腾讯证券行情；日K(前复权)=腾讯证券；涨停/炸板/强势/跌停池与连板数、封单、行业=东方财富涨停池。均为免费公开接口，非交易所官方推送，盘中可能有秒级延迟。',
+    disclaimer: DISCLAIMER
+  };
+
+  return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, boards };
+}
+
+async function getDashboard(query, force) {
+  const now = Date.now();
+  const key = JSON.stringify(query);
+  if (!force && dashCache.value && dashCache.key === key && now - dashCache.at < 9000) return dashCache.value;
+  if (dashCache.inflight) return dashCache.inflight;
+  dashCache.inflight = (async () => {
+    try {
+      const v = await buildDashboard(query);
+      dashCache.value = v; dashCache.key = key; dashCache.at = Date.now();
+      return v;
+    } finally { dashCache.inflight = null; }
+  })();
+  return dashCache.inflight;
+}
+
+/* ─────────── 路由 ─────────── */
+const server = http.createServer(async (req, res) => {
+  const u = new URL(req.url, 'http://localhost:' + ACTIVE_PORT);
+  const q = Object.fromEntries(u.searchParams.entries());
+  try {
+    if (u.pathname === '/api/dashboard') return sendJson(res, await getDashboard(q, q.force === '1'));
+    if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), disclaimer: DISCLAIMER });
+    if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
+    if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());
+    if (u.pathname === '/api/quotes') {
+      const codes = String(q.codes || '').split(',').filter(Boolean).slice(0, 200);
+      return sendJson(res, { quotes: await ds.getQQQuotes(codes), asOf: new Date().toISOString(), source: '腾讯证券实时行情' });
+    }
+    if (u.pathname === '/api/kline') return sendJson(res, { code: q.code, kline: await ds.getKline(q.code, Number(q.limit) || 90), source: '腾讯证券日K(前复权)' });
+    if (u.pathname === '/api/universe') {
+      const uni = await ds.getUniverse();
+      const rows = an.applyFilters(uni.list, q, null);
+      return sendJson(res, { rows, total: uni.count, asOf: uni.asOf, source: uni.source });
+    }
+    if (u.pathname.startsWith('/api/')) return sendJson(res, { error: 'unknown api', path: u.pathname }, 404);
+    return serveStatic(req, res, u.pathname);
+  } catch (e) {
+    console.error('[ERROR]', u.pathname, e);
+    return sendJson(res, { error: String(e && e.message || e), path: u.pathname }, 500);
+  }
+});
+
+function startListen(port, retries) {
+  // 用具名监听器 + 显式移除：listen 失败重试时，若沿用 listen(port, cb) 形式，
+  // 每次调用都会新增一个 'listening' 回调且不会自动清除，最终成功时历史回调会全部触发，
+  // 打印出多个错误端口。这里在 error / listening 任一分支都先清理两个监听器。
+  const cleanup = () => {
+    server.removeListener('error', onError);
+    server.removeListener('listening', onListening);
+  };
+  const onListening = () => {
+    cleanup();
+    ACTIVE_PORT = port;
+    console.log('A股实时复盘与短线机会系统已启动');
+    console.log('本机访问: http://localhost:' + port);
+    console.log('数据源: 新浪财经行情中心 / 腾讯证券行情 / 东方财富涨停池（均为免费公开接口）');
+    // 后台预热一次，使数据源健康状态与首屏数据立即可用（失败不影响服务监听）
+    setTimeout(() => {
+      getDashboard({}, false).catch(e => console.warn('预热未完成（不影响使用）：' + e.message));
+    }, 300);
+  };
+  const onError = err => {
+    cleanup();
+    if (err.code === 'EADDRINUSE' && retries > 0) {
+      console.warn('端口 ' + port + ' 已被占用，自动顺延至 ' + (port + 1));
+      startListen(port + 1, retries - 1);
+    } else {
+      console.error('启动失败：' + err.message);
+      process.exit(1);
+    }
+  };
+  server.once('error', onError);
+  server.once('listening', onListening);
+  server.listen(port, '127.0.0.1');
+}
+startListen(PREFERRED_PORT, 15);

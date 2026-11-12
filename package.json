@@ -1,0 +1,13 @@
+{
+  "name": "a-share-live-review",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A股实时复盘与短线机会系统（免费公开数据源，零第三方依赖）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

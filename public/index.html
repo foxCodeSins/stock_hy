@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A股实时复盘与短线机会系统</title>
+<link rel="stylesheet" href="/styles.css">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <div>
+        <h1>实时复盘 · 短线机会系统</h1>
+        <div class="brand-sub">A股量化复盘 / 连板低吸 / 全市场筛选 · 免费公开数据源</div>
+      </div>
+    </div>
+    <div class="status-cluster">
+      <div class="status-item"><span class="lbl">交易状态</span><span id="tradeState" class="val">—</span></div>
+      <div class="status-item"><span class="lbl">数据时点</span><span id="dataTime" class="val">—</span></div>
+      <div class="status-item"><span class="lbl">数据源</span><span id="healthPill" class="val">检测中</span></div>
+      <div class="status-item"><span class="lbl">下次刷新</span><span id="countdown" class="val">—</span></div>
+      <select id="freq" class="sel" title="自动刷新频率">
+        <option value="8">8 秒</option>
+        <option value="15" selected>15 秒</option>
+        <option value="30">30 秒</option>
+        <option value="60">60 秒</option>
+        <option value="0">暂停</option>
+      </select>
+      <button id="btnRefresh" class="btn btn-primary">立即刷新</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div id="alertBox" class="alert" style="display:none"></div>
+
+  <!-- 首屏结论条 -->
+  <section class="kpi-strip" id="kpiStrip">
+    <div class="kpi placeholder"><span class="lbl">载入中…</span></div>
+  </section>
+
+  <section class="conclusion card" id="conclusionCard" style="display:none"></section>
+
+  <!-- 筛选器 -->
+  <section class="card filter-card">
+    <div class="filter-head">
+      <div class="filter-title"><span class="dot"></span>全局筛选 <span class="muted" id="filterHint">（作用于全部模块）</span></div>
+      <div class="filter-actions">
+        <button id="btnToggleFilter" class="link-btn">收起</button>
+        <button id="btnReset" class="link-btn">重置</button>
+      </div>
+    </div>
+    <div class="filter-body" id="filterBody">
+      <div class="frow">
+        <div class="fgroup wide">
+          <label>市场板块</label>
+          <div class="chips" id="boardChips">
+            <button class="chip active" data-board="全部">全部</button>
+            <button class="chip" data-board="主板">主板</button>
+            <button class="chip" data-board="创业板">创业板</button>
+            <button class="chip" data-board="科创板">科创板</button>
+            <button class="chip" data-board="北交所">北交所</button>
+          </div>
+        </div>
+        <div class="fgroup">
+          <label>流通市值（亿元）</label>
+          <div class="inline-inputs">
+            <input type="number" id="capMin" placeholder="最小" min="0" step="10">
+            <span class="dash">—</span>
+            <input type="number" id="capMax" placeholder="最大" min="0" step="10">
+          </div>
+          <div class="quick" id="capQuick">
+            <button data-min="" data-max="">不限</button>
+            <button data-min="0" data-max="50">&lt;50亿</button>
+            <button data-min="50" data-max="200">50–200亿</button>
+            <button data-min="200" data-max="1000">200–1000亿</button>
+            <button data-min="1000" data-max="">&gt;1000亿</button>
+          </div>
+        </div>
+        <div class="fgroup">
+          <label>板块筛选（行业 / 概念）</label>
+          <select id="sectorSelect" class="sel-full"><option value="">全板块</option></select>
+        </div>
+      </div>
+      <div class="frow">
+        <div class="fgroup">
+          <label>涨跌幅 %</label>
+          <div class="inline-inputs"><input type="number" id="pctMin" placeholder="最小" step="0.5"><span class="dash">—</span><input type="number" id="pctMax" placeholder="最大" step="0.5"></div>
+        </div>
+        <div class="fgroup">
+          <label>换手率 %</label>
+          <div class="inline-inputs"><input type="number" id="turnoverMin" placeholder="最小" step="1"><span class="dash">—</span><input type="number" id="turnoverMax" placeholder="最大" step="1"></div>
+        </div>
+        <div class="fgroup">
+          <label>最低连板数</label>
+          <select id="boardsMin" class="sel-full">
+            <option value="">不限</option><option value="1">≥1 板</option><option value="2">≥2 板（连板）</option>
+            <option value="3">≥3 板</option><option value="4">≥4 板</option><option value="5">≥5 板</option>
+          </select>
+        </div>
+        <div class="fgroup">
+          <label>代码 / 名称</label>
+          <input type="text" id="keyword" class="sel-full" placeholder="如 600519 或 光伏">
+        </div>
+        <div class="fgroup">
+          <label>排序</label>
+          <select id="sortSel" class="sel-full">
+            <option value="score">综合评分</option><option value="techScore">技术评分</option>
+            <option value="pct">涨跌幅</option><option value="amount">成交额</option>
+            <option value="turnover">换手率</option><option value="floatCap">流通市值</option>
+            <option value="boards">连板数</option><option value="sealFundRatio">封单强度</option>
+          </select>
+        </div>
+      </div>
+      <div class="frow frow-last">
+        <label class="check"><input type="checkbox" id="excludeST" checked> 排除 ST / *ST</label>
+        <button id="btnApply" class="btn btn-primary">应用筛选</button>
+        <span class="muted" id="filterSummary">—</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模块导航 -->
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="review">复盘计划</button>
+    <button class="tab" data-tab="picks">短线个股推荐 <span class="tab-badge" id="badgePicks">—</span></button>
+    <button class="tab" data-tab="live">实时机会 <span class="tab-badge" id="badgeLive">—</span></button>
+    <button class="tab tab-accent" data-tab="lowbuy">连板低吸机会 <span class="tab-badge" id="badgeLow">—</span></button>
+  </nav>
+
+  <main>
+    <section class="tabpane active" id="pane-review"></section>
+    <section class="tabpane" id="pane-picks"></section>
+    <section class="tabpane" id="pane-live"></section>
+    <section class="tabpane" id="pane-lowbuy"></section>
+  </main>
+
+  <!-- 数据源与免责 -->
+  <footer class="footer">
+    <div class="card footer-card">
+      <div class="footer-grid">
+        <div>
+          <h4>数据来源与时点</h4>
+          <div id="sourceInfo" class="muted small">—</div>
+        </div>
+        <div>
+          <h4>数据源健康</h4>
+          <div id="healthList" class="health-list">—</div>
+        </div>
+      </div>
+      <div class="disclaimer">
+        <strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。
+      </div>
+      <div class="footer-note small muted">本系统所有行情、市值、连板、封单、板块数据均由免费公开接口实时拉取，服务端不预置任何行情数字；题材阶段与个股评分由量价结构机械推导，未接入新闻 / 公告 / 龙虎榜资讯，消息面请自行核实。</div>
+    </div>
+  </footer>
+</div>
+
+<div id="loading" class="loading-mask"><div class="loading-box"><div class="spinner"></div><div>正在拉取实时行情…</div><div class="small muted">首次加载需抓取全市场约 5,000+ 只个股，请稍候</div></div></div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
