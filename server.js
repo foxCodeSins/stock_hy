@@ -169,6 +169,162 @@ async function buildDashboard(query) {
   return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, boards };
 }
 
+/* ─────────── 涨停回调到支撑位（独立模块，避免拖慢主看板） ─────────── */
+const pullCache = { at: 0, key: '', value: null, inflight: null };
+
+async function buildPullback(query) {
+  const t0 = Date.now();
+  const f = { ...query };
+  delete f._; delete f.force;
+  const lookback = Math.min(15, Math.max(3, Number(f.days) || 8));
+  const scanLimit = Math.min(60, Math.max(12, Number(f.scan) || 42));
+
+  // 1) 候选池 / 全市场 / 市场环境 并行
+  const [hist, universe, pools, indices] = await Promise.all([
+    ds.getRecentLimitUpPools(lookback).catch(() => ({ dates: [], byCode: {} })),
+    ds.getUniverse().catch(() => ({ list: [], count: 0 })),
+    ds.getPools().catch(() => ({ zt: [], qs: [], zb: [], dt: [], date: '' })),
+    ds.getIndices().catch(() => [])
+  ]);
+  const ov = an.marketOverview(universe, indices, pools);
+  const byCode = hist.byCode || {};
+  const candidates = Object.values(byCode);
+  const codes = candidates.map(x => x.code);
+  const quotes = codes.length ? await ds.getQQQuotes(codes).catch(() => ({})) : {};
+  const uniMap = new Map((universe.list || []).map(x => [x.code, x]));
+
+  // 2) 预筛：当日仍强势/当日才涨停/停牌/ST 不进入「回调」扫描
+  const dateIndex = new Map((hist.dates || []).map((d, i) => [d.date, i]));
+  let preselect = candidates.map(x => {
+    const q = quotes[x.code] || {};
+    const u = uniMap.get(x.code) || {};
+    return {
+      ...x, quote: q,
+      pct: q.pct !== null && q.pct !== undefined ? q.pct : u.pct,
+      floatCap: q.floatCap !== null && q.floatCap !== undefined ? q.floatCap : (x.floatCap !== null && x.floatCap !== undefined ? x.floatCap : u.floatCap),
+      turnover: q.turnover !== null && q.turnover !== undefined ? q.turnover : u.turnover,
+      amount: q.amountWan !== null && q.amountWan !== undefined ? q.amountWan * 1e4 : u.amount
+    };
+  }).filter(x => {
+    if (!(x.quote.price > 0)) return false;
+    if (String(f.excludeST || '1') === '1' && /ST/i.test(x.name || '')) return false;
+    if (x.pct !== null && x.pct !== undefined && Number(x.pct) >= 7) return false;
+    if (x.date === pools.date) return false;   // 最新交易日才涨停，尚未进入回调窗口
+    return true;
+  });
+  // 至少 2 根回调 K 线：涨停日必须在 2 个交易日之前（与划线引擎的 z <= len-3 口径一致）
+  preselect.forEach(x => { x.daysAgo = dateIndex.has(x.date) ? dateIndex.get(x.date) : 99; });
+  preselect = preselect.filter(x => x.daysAgo >= 2 && x.daysAgo < 99);
+  // 分层取样：每个回调天数各取若干只（组内按成交额降序），避免 42 个名额全被同一涨停日占满
+  const groups = new Map();
+  preselect.forEach(x => { if (!groups.has(x.daysAgo)) groups.set(x.daysAgo, []); groups.get(x.daysAgo).push(x); });
+  const perDay = Math.max(3, Math.ceil(scanLimit / Math.max(1, groups.size)));
+  const scan = [];
+  [...groups.keys()].sort((a, b) => a - b).forEach(k => {
+    scan.push(...groups.get(k).sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, perDay));
+  });
+  scan.length = Math.min(scan.length, scanLimit);
+
+  // 3) 低并发拉日K（腾讯前复权优先，失败自动降级新浪不复权），避免上游限流
+  const kdata = await limitedMap(scan, 4, async x => ds.getKlineData(x.code, 120).catch(() => null));
+
+  // 4) 逐只划线与判定（全部数值来自真实日K，未返回数据的标的直接跳过并计数）
+  const rows = [];
+  const skipReasons = {};
+  kdata.forEach((kd, i) => {
+    const x = scan[i];
+    if (!x) return;
+    const a = an.pullbackAnalysis(kd && kd.rows, x.quote, x, { code: x.code, ov, klineSource: kd && kd.source });
+    if (!a.available) { skipReasons[a.reason] = (skipReasons[a.reason] || 0) + 1; return; }
+    rows.push({
+      ...a,
+      code: x.code, name: x.name, industry: x.industry,
+      board: ds.boardOf(x.code), isST: /ST/i.test(x.name || ''),
+      pct: x.pct, floatCap: x.floatCap, turnover: x.turnover, amount: x.amount,
+      volRatioQuote: x.quote.volRatio === undefined ? null : x.quote.volRatio,
+      quoteTick: x.quote.ticktime || null,
+      poolDate: x.date, ztBoards: x.boards,
+      klineSource: kd.source, klineAdjusted: kd.adjusted, klineAsOf: kd.asOf,
+      klineNote: kd.adjusted === false ? '本标的日K来自备用源（不复权口径），除权个股的历史价位可能与前复权口径不一致' : null
+    });
+  });
+
+  // 5) 应用全局筛选中与本模块相关的条件
+  let sectorSet = null, sectorLabel = null;
+  if (f.sector && /^[A-Za-z0-9_]+$/.test(String(f.sector))) {
+    sectorSet = await ds.getSectorMembers(String(f.sector));
+    sectorLabel = String(f.sector);
+    if (!sectorSet || !sectorSet.size) sectorSet = null;
+  }
+  const sortWhite = ['score', 'pct', 'amount', 'turnover', 'floatCap', 'nearPct'];
+  const sort = sortWhite.includes(f.sort) ? f.sort : 'score';
+  const list = an.applyFilters(rows, {
+    board: f.board, capMin: f.capMin, capMax: f.capMax,
+    pctMin: f.pctMin, pctMax: f.pctMax,
+    turnoverMin: f.turnoverMin, turnoverMax: f.turnoverMax,
+    excludeST: f.excludeST, keyword: f.keyword,
+    sort, sortDir: sort === 'nearPct' ? 'asc' : 'desc', limit: 60
+  }, sectorSet);
+
+  const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
+  const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;
+  const quoteTick = latestQT && String(latestQT).length >= 14
+    ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14) : null;
+  const klineSources = [...new Set(kdata.filter(d => d && d.source).map(d => d.source))];
+  const fallback = klineSources.some(s => /新浪/.test(s));
+  const levels = {};
+  rows.forEach(x => { levels[x.level] = (levels[x.level] || 0) + 1; });
+  const statuses = {};
+  rows.forEach(x => { statuses[x.status] = (statuses[x.status] || 0) + 1; });
+
+  const summary = {
+    historyDates: hist.dates || [], historyCount: candidates.length,
+    preselectCount: preselect.length, scannedCount: scan.length,
+    klineOk: kdata.filter(d => d && d.rows && d.rows.length).length,
+    analyzedCount: rows.length, shown: list.length,
+    levels, statuses, skipReasons,
+    nearCount: rows.filter(x => x.status === '已回踩到位' || x.status === '接近支撑').length,
+    brokenCount: rows.filter(x => x.broken).length,
+    klineSources, fallback, sectorLabel
+  };
+
+  const meta = {
+    ...beijingNow(),
+    generatedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - t0,
+    poolDate: pools.date || null,
+    quoteTick, universeCount: universe.count,
+    health: ds.getHealth(), port: ACTIVE_PORT,
+    sources: Object.values(ds.SOURCE_META).map(s => ({ label: s.label, host: s.host, standby: !!s.standby })),
+    marketTier: ov.tier, marketEmotion: ov.emotion,
+    methodology: an.PULLBACK_METHOD,
+    filters: f,
+    dataSourceNote: '历史涨停候选=东方财富涨停池（近 ' + (hist.dates || []).length + ' 个交易日）；实时价/流通市值/换手=腾讯证券行情；日K与划线=' + (klineSources.join(' / ') || '未取得') + '；市场档位=本地量化引擎由新浪全市场快照与东财涨停池推导。',
+    klineNote: fallback
+      ? '腾讯前复权日K当前不可用，已自动降级为「新浪财经日K（不复权）」；除权个股的历史价位划线可能与前复权口径不一致，请以此标注为准。'
+      : '日K为腾讯证券前复权口径。',
+    historyNote: hist.note || '',
+    disclaimer: DISCLAIMER
+  };
+
+  return { meta, summary, methodology: an.PULLBACK_METHOD, list };
+}
+
+async function getPullback(query, force) {
+  const now = Date.now();
+  const key = JSON.stringify(query);
+  if (!force && pullCache.value && pullCache.key === key && now - pullCache.at < 180000) return pullCache.value;
+  if (pullCache.inflight) return pullCache.inflight;
+  pullCache.inflight = (async () => {
+    try {
+      const v = await buildPullback(query);
+      pullCache.value = v; pullCache.key = key; pullCache.at = Date.now();
+      return v;
+    } finally { pullCache.inflight = null; }
+  })();
+  return pullCache.inflight;
+}
+
 async function getDashboard(query, force) {
   const now = Date.now();
   const key = JSON.stringify(query);
@@ -190,6 +346,7 @@ const server = http.createServer(async (req, res) => {
   const q = Object.fromEntries(u.searchParams.entries());
   try {
     if (u.pathname === '/api/dashboard') return sendJson(res, await getDashboard(q, q.force === '1'));
+    if (u.pathname === '/api/pullback') return sendJson(res, await getPullback(q, q.force === '1'));
     if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), disclaimer: DISCLAIMER });
     if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
     if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());

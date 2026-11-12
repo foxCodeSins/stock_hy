@@ -19,8 +19,11 @@
     data: null, prevPrices: {}, tab: 'review', boards: new Set(['全部']),
     freq: 15, tick: 0, timer: null, boardsList: null,
     collapsed: new Set(), expanded: new Set(), chartsReady: !!window.echarts,
-    lastFilters: ''
+    lastFilters: '',
+    pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
+    pullFilters: '', pullError: null, pullMethodOpen: false
   };
+  const activeHealth = m => (m.health || []).filter(h => !h.standby);
 
   /* ─────────────── 初始化与事件 ─────────────── */
   function init() {
@@ -61,7 +64,7 @@
     });
     loadBoards();
     const initTab = new URLSearchParams(location.search).get('tab');
-    if (initTab && ['review', 'picks', 'live', 'lowbuy'].indexOf(initTab) >= 0) switchTab(initTab);
+    if (initTab && ['review', 'picks', 'live', 'lowbuy', 'pullback'].indexOf(initTab) >= 0) switchTab(initTab);
     refresh(true);
     startTimer();
   }
@@ -153,6 +156,9 @@
       S.data = j;
       S.lastFilters = describeFilters(f);
       render();
+      // 新模块走独立 API：仅在该 tab 可见、筛选变化或超过 60 秒时才重新扫描，避免拖累 15 秒主看板刷新
+      if (S.tab === 'pullback' && Date.now() - S.pullAt > 12000 &&
+        (S.pullFilters !== S.lastFilters || Date.now() - S.pullAt > 60000)) loadPullback(false);
       $('loading').classList.add('hide');
       $('alertBox').style.display = 'none';
     } catch (e) {
@@ -181,7 +187,8 @@
   function switchTab(t) {
     S.tab = t;
     [...$('tabs').children].forEach(c => c.classList.toggle('active', c.dataset.tab === t));
-    ['review', 'picks', 'live', 'lowbuy'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
+    ['review', 'picks', 'live', 'lowbuy', 'pullback'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
+    if (t === 'pullback' && !S.pull && !S.pullLoading) loadPullback(false);
     setTimeout(() => { Object.values(S.charts || {}).forEach(c => { try { c.resize(); } catch (e) { } }); }, 60);
   }
 
@@ -200,6 +207,7 @@
     $('badgePicks').textContent = (d.picks || []).length;
     $('badgeLive').textContent = ov.limitUp + ' 涨停';
     $('badgeLow').textContent = (d.lowbuy || []).length;
+    if (S.pull) $('badgePull').textContent = (S.pull.list || []).length;
   }
 
   function renderMeta(m, ov) {
@@ -207,7 +215,7 @@
     $('tradeState').title = m.note + '；' + m.caveat;
     $('dataTime').textContent = (m.quoteTick || m.universeTick || m.now.slice(11, 19)) + ' / ' + (m.poolDate || '—');
     $('dataTime').title = '腾讯实时快照：' + (m.quoteTick || '—') + '；新浪全市场快照：' + (m.universeTick || '—') + '；涨停池交易日：' + (m.poolDate || '—') + '；服务端生成：' + m.generatedAt;
-    const hs = m.health || [], ok = hs.filter(h => h.ok).length;
+    const hs = activeHealth(m), ok = hs.filter(h => h.ok).length;
     const pill = $('healthPill');
     pill.textContent = ok + '/' + hs.length + ' 在线';
     pill.style.color = ok === hs.length ? 'var(--down)' : (ok === 0 ? 'var(--up)' : 'var(--warn)');
@@ -237,7 +245,7 @@
       tag(m.state, 'blue'),
       tag('全市场 ' + ov.universeCount + ' 只', ''),
       tag('强势股池 ' + (ov.strongStocks || 0) + ' 只', ''),
-      tag('数据源 ' + (m.health || []).filter(h => h.ok).length + '/' + (m.health || []).length + ' 在线', (m.health || []).every(h => h.ok) ? 'green' : 'warn')
+      tag('数据源 ' + activeHealth(m).filter(h => h.ok).length + '/' + activeHealth(m).length + ' 在线', activeHealth(m).every(h => h.ok) ? 'green' : 'warn')
     ];
     $('conclusionCard').style.display = '';
     $('conclusionCard').innerHTML = '<div class="lead">' + E(lead) + '<div class="small muted" style="font-weight:400;margin-top:5px">' + E(m.note) + '；本页所有数字为行情快照，盘中可能存在秒级延迟。</div></div><div class="tags">' + tags.join('') + '</div>';
@@ -556,6 +564,314 @@
     safeChart('chartLowScore', scoreOpt, scoreItems);
   }
 
+  /* ─────────────── 涨停回踩支撑（K线图 + 划线解释） ─────────────── */
+  function pbLevelClass(l) {
+    return l === '重点观察' ? 'recommend' : l === '条件观察' ? 'watch' : l === '已失效' ? 'no' : 'plain';
+  }
+  function pbStatusTag(s) {
+    return tag(s, s === '已回踩到位' ? 'red' : s === '接近支撑' ? 'warn' : s === '跌破支撑' ? 'green' : '');
+  }
+  const pbKv = (k, v) => '<div class="pb-kv"><span>' + E(k) + '</span><b>' + v + '</b></div>';
+
+  async function loadPullback(force) {
+    if (S.pullLoading) return;
+    S.pullLoading = true;
+    if (!S.pull) $('pane-pullback').innerHTML = '<div class="card empty">正在回溯近期涨停股、逐只核对真实日K并计算支撑压力位…</div>';
+    const f = collectFilters();
+    const q = new URLSearchParams();
+    ['board', 'capMin', 'capMax', 'pctMin', 'pctMax', 'turnoverMin', 'turnoverMax', 'excludeST', 'keyword', 'sector', 'sort', 'limit']
+      .forEach(k => { if (f[k] !== '' && f[k] !== undefined) q.set(k, f[k]); });
+    if (force) q.set('force', '1');
+    try {
+      const r = await fetch('/api/pullback?' + q.toString(), { cache: 'no-store' });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error);
+      S.pull = j; S.pullAt = Date.now(); S.pullFilters = describeFilters(f); S.pullError = null;
+      const list = j.list || [];
+      if (!list.some(x => x.code === S.pullSelected)) S.pullSelected = list.length ? list[0].code : null;
+      renderPullback();
+      $('badgePull').textContent = list.length;
+    } catch (e) {
+      S.pullError = e.message;
+      S.pullAt = Date.now();   // 失败后防抖，避免自动刷新每 15 秒重复打上游
+      $('pane-pullback').innerHTML =
+        '<div class="card empty">划线数据加载失败：' + E(e.message) +
+        '<br><span class="small muted">可点击「重新扫描」重试；上游接口临时不可用时，系统不会填充任何推测数据。</span></div>' +
+        '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="pbRetry">重新扫描</button></div>';
+      if ($('pbRetry')) $('pbRetry').onclick = () => loadPullback(true);
+    } finally { S.pullLoading = false; }
+  }
+
+  function renderPullback() {
+    const j = S.pull; if (!j) return;
+    const m = j.meta || {}, s = j.summary || {}, list = j.list || [], meth = j.methodology || {};
+    const lvl = s.levels || {};
+    const dates = (s.historyDates || []).map(d => d.date).join('、');
+    const warn = /降级|不复权/.test(m.klineNote || '')
+      ? '<div class="pb-warn">口径提示：' + E(m.klineNote) + '</div>' : '';
+    const head =
+      '<div class="conclusion card pb-head"><div class="lead">扫描近 ' + (s.historyDates || []).length + ' 个交易日的 ' + E(s.historyCount) +
+      ' 只涨停股，核对真实日K后得到 <b>' + E(s.analyzedCount) + '</b> 只回调结构标的，其中 <b>' + E(s.nearCount) + '</b> 只已回踩或接近支撑位。</div>' +
+      '<div class="tags">' +
+      tag('重点观察 ' + (lvl['重点观察'] || 0), 'red') + tag('条件观察 ' + (lvl['条件观察'] || 0), 'warn') +
+      tag('仅跟踪 ' + (lvl['仅跟踪'] || 0), '') + tag('已失效 ' + (lvl['已失效'] || 0), 'green') +
+      tag('市场档位：' + (m.marketTier || '—'), 'blue') + tag('情绪：' + (m.marketEmotion || '—'), 'blue') + '</div></div>';
+
+    const source =
+      '<div class="card pad pb-source">' +
+      '<div>候选来源：东方财富涨停池（' + E(dates || '—') + '，共 ' + E(s.historyCount) + ' 只）· 实时快照：腾讯证券 ' + E(m.quoteTick || '—') +
+      ' · 日K口径：<b>' + E((s.klineSources || []).join(' / ') || '未取得') + '</b></div>' +
+      '<div>预筛 ' + E(s.preselectCount) + ' 只 → 取 ' + E(s.scannedCount) + ' 只拉日K（成功 ' + E(s.klineOk) + ' 只）→ 完成划线 ' + E(s.analyzedCount) +
+      ' 只 · 服务端耗时 ' + E(m.elapsedMs) + ' ms · 生成时点 ' + E(m.generatedAt) + '</div>' +
+      warn +
+      '<div class="pb-actions"><button class="btn btn-primary" id="pbRescan">重新扫描</button> ' +
+      '<button class="btn" id="pbMethod">' + (S.pullMethodOpen ? '收起' : '查看') + '划线口径说明</button> ' +
+      '<span class="small muted">本模块应用：市场板块 / 流通市值 / 涨跌幅 / 换手 / 排除ST / 关键字 / 板块筛选；「最低连板数」不适用于回调结构。</span></div></div>';
+
+    const method = '<div class="card pad pb-method" id="pbMethodBox" style="display:' + (S.pullMethodOpen ? '' : 'none') + '">' +
+      '<h4 style="font-size:13px;margin-bottom:9px">划线口径（先看规则，再看线）</h4>' +
+      (meth.steps || []).map(st => '<div class="pb-step"><b>' + E(st.name) + '</b><span>' + E(st.text) + '</span></div>').join('') +
+      '<div class="note-box">' + E(meth.caveat || '') + '</div></div>';
+
+    const items = list.map(x =>
+      '<div class="pb-item' + (x.code === S.pullSelected ? ' active' : '') + '" data-code="' + E(x.code) + '">' +
+      '<div class="pb-item-top"><b>' + E(x.name) + '</b><span class="code">' + E(x.code) + '</span>' +
+      '<span class="verdict ' + pbLevelClass(x.level) + '">' + E(x.level) + '</span></div>' +
+      '<div class="pb-item-mid"><span>现价 <b>' + N(x.price) + '</b></span>' + PC(x.pct) + '<span>评分 <b>' + E(x.score) + '</b></span></div>' +
+      '<div class="pb-item-bot"><span>涨停 ' + E(String(x.ztDate).slice(5)) + ' · 回调 ' + E(x.sinceZt) + ' 日</span>' + pbStatusTag(x.status) + '</div>' +
+      '<div class="pb-item-sup">主支撑 ' + E(x.primarySupport.short) + ' ' + N(x.primarySupport.price) +
+      ' · 距 ' + (x.nearPct > 0 ? '+' : '') + N(x.nearPct, 1) + '%</div></div>'
+    ).join('');
+
+    const why = s.analyzedCount
+      ? '已完成划线的 ' + E(s.analyzedCount) + ' 只标的均被当前全局筛选条件过滤，请放宽市值 / 涨跌幅 / 换手 / 板块条件。'
+      : '可能原因：近期涨停股大多仍在涨停当日或次日窗口内（本模块要求至少 2 根回调K线）、当日仍强势，或上游日K接口临时不可用。';
+    const empty = '<div class="card empty pb-empty"><b>当前没有符合条件的回踩标的</b><br><span class="small muted">' + why +
+      '系统不会用推测数据填充列表。</span><br><span class="small muted">扫描链路：候选 ' + E(s.historyCount) + ' 只 → 预筛 ' + E(s.preselectCount) +
+      ' 只 → 日K成功 ' + E(s.klineOk) + '/' + E(s.scannedCount) + ' 只 → 完成划线 ' + E(s.analyzedCount) + ' 只。</span></div>';
+
+    const body = list.length
+      ? '<div class="pb-layout"><div class="pb-list" id="pbList">' + items + '</div><div class="pb-detail" id="pbDetail"></div></div>'
+      : empty;
+    const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
+
+    $('pane-pullback').innerHTML = head + source + method + body + disc;
+    if ($('pbRescan')) $('pbRescan').onclick = () => loadPullback(true);
+    if ($('pbMethod')) $('pbMethod').onclick = () => {
+      S.pullMethodOpen = !S.pullMethodOpen;
+      $('pbMethodBox').style.display = S.pullMethodOpen ? '' : 'none';
+      $('pbMethod').textContent = (S.pullMethodOpen ? '收起' : '查看') + '划线口径说明';
+    };
+    $('pane-pullback').querySelectorAll('.pb-item').forEach(el => {
+      el.onclick = () => {
+        S.pullSelected = el.dataset.code;
+        $('pane-pullback').querySelectorAll('.pb-item').forEach(n => n.classList.toggle('active', n === el));
+        renderPullDetail();
+      };
+    });
+    renderPullDetail();
+  }
+
+  function renderPullDetail() {
+    const j = S.pull; if (!j) return;
+    const box = $('pbDetail'); if (!box) return;
+    const x = (j.list || []).find(a => a.code === S.pullSelected);
+    if (!x) { box.innerHTML = '<div class="card empty">请选择左侧标的查看 K 线图与划线解释</div>'; return; }
+    box.innerHTML = detailHead(x) + klineCard(x) + lineExplanations(x) + tradePlanCard(x, j.meta || {});
+  }
+
+  function detailHead(x) {
+    const ps = x.primarySupport || {}, pr = x.primaryResistance || {};
+    return '<div class="card pb-detail-head">' +
+      '<div class="pb-dh-top"><span class="lb-name">' + E(x.name) + '</span><span class="lb-code">' + E(x.code) + '</span>' +
+      tag(x.board || '—', '') + tag(x.industry || '无行业', 'purple') + pbStatusTag(x.status) +
+      '<span class="lb-spacer"></span><span class="verdict ' + pbLevelClass(x.level) + '">' + E(x.level) + '</span></div>' +
+      '<div class="pb-dh-reason">结论：' + E(x.reason) + '</div>' +
+      '<div class="pb-kv-grid">' +
+      pbKv('现价 / 涨跌幅', N(x.price) + ' 元　' + PC(x.pct)) +
+      pbKv('涨停日 / 回调', E(x.ztDate) + ' · ' + E(x.sinceZt) + ' 个交易日') +
+      pbKv('阶段高点 / 回撤', N(x.swingHigh) + '（' + E(String(x.swingHighDate).slice(5)) + '）· −' + N(x.drawdown, 1) + '%') +
+      pbKv('起涨低点 / 回撤比例', N(x.swingLow) + ' · 回吐 ' + N(x.retrace, 1) + '%') +
+      pbKv('主支撑 / 距现价', E(ps.short) + ' ' + N(ps.price) + ' · ' + (x.nearPct > 0 ? '+' : '') + N(x.nearPct, 1) + '%') +
+      pbKv('主压力 / 上方空间', (pr.short ? E(pr.short) + ' ' + N(pr.price) : '—') + ' · +' + N(x.roomPct, 1) + '%') +
+      pbKv('缩量比 / RSI14', (x.volRatio === null ? '—' : N(x.volRatio) + ' 倍') + ' · ' + E(x.rsi14 === null ? '—' : x.rsi14)) +
+      pbKv('MA20 / 评分', N(x.ma && x.ma.ma20) + ' · ' + (x.aboveMA20 ? '站上' : '跌破') + ' · ' + E(x.score) + ' 分') +
+      '</div>' +
+      '<div class="pb-trace-line">' + E(x.sourceNote) + '　|　涨停日交叉校验：' + E(x.ztSourceNote) + '</div></div>';
+  }
+
+  /** 零依赖 SVG K 线图：蜡烛 + 成交量 + 均线 + 水平支撑/压力线 + 右侧标签 + 观察区 */
+  function klineCard(x) {
+    const c = x.chart || {}, bars = c.bars || [];
+    if (bars.length < 10) return '<div class="card empty">该标的日K数据不足，无法绘制K线图（不生成示意图）</div>';
+    const W = 940, H = 438, L = 58, R = 136, PW = W - L - R;
+    const PT = 28, PB = 292, VT = 312, VB = 372, DY = 392;
+    let minP = Math.min(...bars.map(b => b.low)), maxP = Math.max(...bars.map(b => b.high));
+    const visible = (c.lines || []).filter(l => l.price >= minP * 0.97 && l.price <= maxP * 1.03);
+    visible.forEach(l => { minP = Math.min(minP, l.price); maxP = Math.max(maxP, l.price); });
+    if (c.zone) { minP = Math.min(minP, c.zone[0]); maxP = Math.max(maxP, c.zone[1]); }
+    minP = Math.min(minP, c.price); maxP = Math.max(maxP, c.price);
+    const pad = (maxP - minP) * 0.06 || maxP * 0.02;
+    minP -= pad; maxP += pad;
+    const Y = p => PB - (p - minP) / (maxP - minP) * (PB - PT);
+    const maxV = Math.max(1, ...bars.map(b => b.volume || 0));
+    const cw = PW / bars.length, bw = Math.max(2, Math.min(9, cw * 0.62));
+    const CX = i => L + cw * (i + 0.5);
+    const a = [];
+    a.push('<svg class="pb-kline" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + E(x.name) + ' 日K线与支撑压力划线">');
+    a.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"/>');
+    for (let i = 0; i <= 4; i++) {
+      const p = minP + (maxP - minP) * i / 4, y = Y(p);
+      a.push('<line x1="' + L + '" y1="' + y.toFixed(1) + '" x2="' + (L + PW) + '" y2="' + y.toFixed(1) + '" stroke="#eef2f7" stroke-width="1"/>');
+      a.push('<text x="' + (L - 7) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end" font-size="10" fill="#8593a3">' + p.toFixed(2) + '</text>');
+    }
+    if (c.zone) {
+      const y1 = Y(c.zone[1]), y2 = Y(c.zone[0]);
+      a.push('<rect x="' + L + '" y="' + y1.toFixed(1) + '" width="' + PW + '" height="' + Math.max(2, y2 - y1).toFixed(1) + '" fill="#eaf2fd" opacity="0.8"/>');
+      a.push('<text x="' + (L + 5) + '" y="' + (y1 - 4).toFixed(1) + '" font-size="10" fill="#2f6fd0">回踩观察区 ' + N(c.zone[0]) + '–' + N(c.zone[1]) + '</text>');
+    }
+    bars.forEach((b, i) => {
+      const cx = CX(i), col = b.close >= b.open ? '#d92b2b' : '#0f9960';
+      const yo = Y(b.open), yc = Y(b.close), yh = Y(b.high), yl = Y(b.low);
+      const tip = E(b.date) + ' 开 ' + N(b.open) + ' 高 ' + N(b.high) + ' 低 ' + N(b.low) + ' 收 ' + N(b.close) + ' 量 ' + E(b.volume);
+      a.push('<g><title>' + tip + '</title>');
+      a.push('<line x1="' + cx.toFixed(1) + '" y1="' + yh.toFixed(1) + '" x2="' + cx.toFixed(1) + '" y2="' + yl.toFixed(1) + '" stroke="' + col + '" stroke-width="1"/>');
+      a.push('<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + Math.min(yo, yc).toFixed(1) + '" width="' + bw.toFixed(1) +
+        '" height="' + Math.max(1.4, Math.abs(yo - yc)).toFixed(1) + '" fill="' + col + '"/></g>');
+    });
+    [['ma5', '#e8912a'], ['ma10', '#2f6fd0'], ['ma20', '#6d4bd6']].forEach(pair => {
+      const arr = c[pair[0]] || [], pts = [];
+      arr.forEach((v, i) => { if (v !== null && v !== undefined && Number.isFinite(v)) pts.push(CX(i).toFixed(1) + ',' + Y(v).toFixed(1)); });
+      if (pts.length > 1) a.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + pair[1] + '" stroke-width="1.2" opacity="0.85"/>');
+    });
+    const labels = [];
+    visible.forEach(l => {
+      const y = Y(l.price), isMain = !!(x.primarySupport && l.id === x.primarySupport.id);
+      const col = l.kind === 'support' ? (isMain ? '#0f7b6c' : '#2f6fd0') : '#d92b2b';
+      a.push('<line x1="' + L + '" y1="' + y.toFixed(1) + '" x2="' + (L + PW) + '" y2="' + y.toFixed(1) +
+        '" stroke="' + col + '" stroke-width="' + (isMain ? 1.9 : 1.1) + '" stroke-dasharray="' + (isMain ? '7 3' : '4 4') +
+        '" opacity="' + (isMain ? 0.95 : 0.7) + '"/>');
+      labels.push({ y, col, text: l.id + ' ' + l.short + ' ' + N(l.price), isMain });
+    });
+    const py = Y(c.price);
+    a.push('<line x1="' + L + '" y1="' + py.toFixed(1) + '" x2="' + (L + PW) + '" y2="' + py.toFixed(1) + '" stroke="#1c2733" stroke-width="1" stroke-dasharray="2 3" opacity="0.55"/>');
+    labels.push({ y: py, col: '#1c2733', text: '现价 ' + N(c.price), dark: true });
+    labels.sort((p, q) => p.y - q.y);
+    let lastY = -100;
+    labels.forEach(lb => {
+      let ly = Math.max(PT + 10, Math.min(PB + 20, lb.y));
+      if (ly - lastY < 15) ly = lastY + 15;
+      lastY = ly;
+      const lx = L + PW + 6, txt = lb.text.length > 17 ? lb.text.slice(0, 16) + '…' : lb.text;
+      if (Math.abs(ly - lb.y) > 2)
+        a.push('<line x1="' + (L + PW) + '" y1="' + lb.y.toFixed(1) + '" x2="' + (lx - 2) + '" y2="' + ly.toFixed(1) + '" stroke="' + lb.col + '" stroke-width="0.8" opacity="0.5"/>');
+      a.push('<rect x="' + lx + '" y="' + (ly - 8).toFixed(1) + '" width="' + (R - 12) + '" height="15" rx="3" fill="' + lb.col + '" opacity="' + (lb.dark ? 1 : 0.92) + '"/>');
+      a.push('<text x="' + (lx + 5) + '" y="' + (ly + 3).toFixed(1) + '" font-size="10" fill="#ffffff" font-weight="600">' + E(txt) + '</text>');
+    });
+    const zi = bars.findIndex(b => b.date === c.ztDate);
+    if (zi >= 0) {
+      const cx = CX(zi), top = Y(bars[zi].high);
+      a.push('<path d="M' + (cx - 5).toFixed(1) + ' ' + (top - 9).toFixed(1) + ' L' + (cx + 5).toFixed(1) + ' ' + (top - 9).toFixed(1) +
+        ' L' + cx.toFixed(1) + ' ' + (top - 3).toFixed(1) + ' Z" fill="#d92b2b"/>');
+      a.push('<text x="' + cx.toFixed(1) + '" y="' + (top - 12).toFixed(1) + '" text-anchor="middle" font-size="9.5" fill="#d92b2b" font-weight="700">涨停</text>');
+    }
+    const hi = bars.findIndex(b => b.date === c.highDate);
+    if (hi >= 0) {
+      const cx = CX(hi), top = Y(bars[hi].high);
+      a.push('<circle cx="' + cx.toFixed(1) + '" cy="' + (top - 3).toFixed(1) + '" r="2.6" fill="#d97706"/>');
+      a.push('<text x="' + cx.toFixed(1) + '" y="' + (top - 7).toFixed(1) + '" text-anchor="middle" font-size="9" fill="#d97706">阶段高</text>');
+    }
+    a.push('<line x1="' + L + '" y1="' + VT + '" x2="' + (L + PW) + '" y2="' + VT + '" stroke="#eef2f7"/>');
+    a.push('<text x="' + (L - 7) + '" y="' + (VT + 10) + '" text-anchor="end" font-size="9" fill="#8593a3">量</text>');
+    bars.forEach((b, i) => {
+      const h = (b.volume || 0) / maxV * (VB - VT - 4), col = b.close >= b.open ? '#d92b2b' : '#0f9960';
+      a.push('<rect x="' + (CX(i) - bw / 2).toFixed(1) + '" y="' + (VB - h).toFixed(1) + '" width="' + bw.toFixed(1) +
+        '" height="' + Math.max(1, h).toFixed(1) + '" fill="' + col + '" opacity="0.55"><title>' + E(b.date) + ' 成交量 ' + E(b.volume) + '</title></rect>');
+    });
+    const step = Math.max(1, Math.ceil(bars.length / 6));
+    bars.forEach((b, i) => {
+      if (i % step === 0 || i === bars.length - 1)
+        a.push('<text x="' + CX(i).toFixed(1) + '" y="' + DY + '" text-anchor="middle" font-size="9.5" fill="#8593a3">' + E(String(b.date).slice(5)) + '</text>');
+    });
+    const legend = [['#d92b2b', '阳线'], ['#0f9960', '阴线'], ['#e8912a', 'MA5'], ['#2f6fd0', 'MA10/支撑'], ['#6d4bd6', 'MA20'], ['#0f7b6c', '主支撑'], ['#d92b2b', '压力位']];
+    let lx = L;
+    legend.forEach(pair => {
+      a.push('<rect x="' + lx + '" y="8" width="8" height="8" rx="2" fill="' + pair[0] + '"/>');
+      a.push('<text x="' + (lx + 12) + '" y="16" font-size="10" fill="#6b7a8c">' + pair[1] + '</text>');
+      lx += 92;
+    });
+    a.push('<text x="' + L + '" y="420" font-size="10" fill="#8593a3">日K：' + E(c.source || '—') + '（截至 ' + E(c.asOf || '—') + '，' + bars.length +
+      ' 根）；划线由本系统按规则从真实日K计算，非交易所数据；鼠标悬停K线可查看当日 OHLC。</text>');
+    a.push('</svg>');
+    return '<div class="card pb-chart-card"><div class="pb-chart-head"><h4>日K线图与支撑 / 压力划线</h4>' + src(x.sourceNote) + '</div>' +
+      '<div class="pb-svg-wrap">' + a.join('') + '</div>' +
+      '<div class="note-box">图上只标注最重要的 4 条支撑 + 3 条压力（距现价过远的线不画，避免压缩K线），完整清单与每条线的生成依据见下方「划线解释」。蓝色 / 绿色虚线为支撑，红色虚线为压力，粗绿虚线为主支撑，浅蓝阴影为回踩观察区。</div></div>';
+  }
+
+  function lineExplanations(x) {
+    const shown = x.chart.lines || [], ids = new Set(shown.map(l => l.id));
+    const all = [...(x.supports || []), ...(x.resistances || [])];
+    const cards = shown.map(l => {
+      const main = !!(x.primarySupport && l.id === x.primarySupport.id);
+      const col = l.kind === 'support' ? (main ? '#0f7b6c' : '#2f6fd0') : '#d92b2b';
+      return '<div class="lv-card" style="border-left-color:' + col + '">' +
+        '<div class="lv-top"><span class="lv-id" style="background:' + col + '">' + E(l.id) + '</span><b>' + E(l.name) + '</b>' +
+        '<span class="lv-price">' + N(l.price) + ' 元</span>' + tag(l.kind === 'support' ? '支撑' : '压力', l.kind === 'support' ? 'blue' : 'red') +
+        (main ? tag('主支撑', 'green') : '') +
+        '<span class="lv-dist">距现价 ' + (l.distPct > 0 ? '+' : '') + N(l.distPct, 1) + '%</span></div>' +
+        '<div class="lv-basis"><b>为什么画在这里：</b>' + E(l.basis) + '</div>' +
+        '<div class="lv-foot">历史有效触碰 ' + E(l.touches) + ' 次' + (l.lastTouch ? '（末次 ' + E(String(l.lastTouch).slice(5)) + '）' : '') +
+        ' · 强度 ' + E(l.strength) + '/3 · ' + E(l.source) + '</div></div>';
+    }).join('');
+    const rows = all.map(l =>
+      '<tr' + (ids.has(l.id) ? ' class="lv-onchart"' : '') + '><td class="left">' + (ids.has(l.id) ? '<span class="dot-on">●</span> ' : '') + E(l.id) + '</td>' +
+      '<td class="left">' + E(l.short) + '</td><td>' + N(l.price) + '</td><td>' + (l.distPct > 0 ? '+' : '') + N(l.distPct, 1) + '%</td>' +
+      '<td>' + E(l.touches) + '</td><td class="left">' + tag(l.kind === 'support' ? '支撑' : '压力', l.kind === 'support' ? 'blue' : 'red') + '</td>' +
+      '<td class="left small">' + E(l.basis) + '</td></tr>'
+    ).join('');
+    const ma = (x.maRefs || []).map(r =>
+      '<div class="kv"><span class="k">' + E(r.name) + '</span><span class="v">' + N(r.price) + ' 元 · ' + E(r.note) + '</span></div>').join('');
+    return '<div class="card pad pb-lines"><div class="sec-head"><h3>划线解释（逐条可追溯）</h3>' +
+      src(x.chart.source + '，截至 ' + x.chart.asOf) + '</div>' +
+      '<div class="pb-note">读图顺序：先看现价与主支撑的距离（是否回踩到位），再看上方压力决定空间，最后看缩量与收盘是否破位。支撑被收盘有效跌破即转为压力，这就是「支撑压力互换」。</div>' +
+      '<div class="lv-grid">' + cards + '</div>' +
+      '<div class="sec-head" style="margin-top:15px"><h3 style="font-size:12.5px">完整水平位清单</h3><span class="src">● 表示已画在图上</span></div>' +
+      '<div class="tbl-wrap"><table><thead><tr><th class="left">编号</th><th class="left">线名</th><th>价位</th><th>距现价</th><th>触碰</th><th class="left">类型</th><th class="left">生成依据</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div class="sec-head" style="margin-top:13px"><h3 style="font-size:12.5px">动态参考线（非水平划线）</h3></div><div class="pb-ma">' + ma + '</div>' +
+      (x.klineNote ? '<div class="pb-warn">口径提示：' + E(x.klineNote) + '</div>' : '') + '</div>';
+  }
+
+  function tradePlanCard(x, m) {
+    const p = x.plan || {};
+    const parts = (x.scoreParts || []).map(z =>
+      '<div class="sp"><span class="spn">' + E(z.factor) + '</span><div class="spb"><div class="spf" style="width:' +
+      (z.max ? Math.max(0, Math.min(100, z.got / z.max * 100)) : 0) + '%"></div></div><span class="spv">' + E(z.got) + '/' + E(z.max) + '</span></div>'
+    ).join('');
+    const li = arr => (arr || []).map(t => '<li>' + E(t) + '</li>').join('');
+    return '<div class="pb-plan-grid">' +
+      '<div class="card pad"><div class="sec-head"><h3 style="font-size:12.5px">条件化观察框架（非买卖指令）</h3></div>' +
+      '<div class="zone-box"><div class="zl">回踩观察区间（元）</div><div class="zv">' + N(p.zone && p.zone[0]) + ' — ' + N(p.zone && p.zone[1]) + '</div>' +
+      '<div class="zone-row"><span class="small">止损参考 <b class="down">' + N(p.stop) + '</b></span>' +
+      '<span class="small">上方目标 <b class="up">' + N(p.target) + '</b></span>' +
+      '<span class="small">盈亏比 <b>' + N(p.rr) + '</b></span></div></div>' +
+      '<div class="note-box"><b>区间算法：</b>' + E(p.basis) + '</div>' +
+      '<div class="sec-head" style="margin-top:12px"><h3 style="font-size:12.5px">评分拆解（' + E(x.score) + ' / 100）</h3></div>' +
+      '<div class="score-parts">' + parts + '</div>' +
+      (x.veto && x.veto.length ? '<div class="veto"><b>一票否决项（' + x.veto.length + '）：</b><br>' + x.veto.map(z => '· ' + E(z)).join('<br>') + '</div>' : '') +
+      '</div>' +
+      '<div class="card pad"><div class="sec-head"><h3 style="font-size:12.5px">确认条件 / 分仓路径 / 失效条件</h3></div>' +
+      '<h5 class="pb-h5">需同时确认（否则不进入观察）</h5><ul class="tight">' + li(p.conditions) + '</ul>' +
+      '<h5 class="pb-h5">分仓路径（研究框架示例）</h5><ul class="tight">' + li(p.steps) + '</ul>' +
+      '<h5 class="pb-h5" style="color:var(--up)">计划失效条件（触发即退出）</h5><ul class="tight">' + li(p.invalid) + '</ul>' +
+      '<div class="pb-trace"><h5 class="pb-h5">数据溯源</h5>' +
+      '<div class="kv"><span class="k">候选涨停标记</span><span class="v">东方财富涨停池 ' + E(x.poolDate || '—') + '</span></div>' +
+      '<div class="kv"><span class="k">实时价 / 涨跌幅</span><span class="v">腾讯证券 ' + E(x.quoteTick || '—') + '</span></div>' +
+      '<div class="kv"><span class="k">日K与划线</span><span class="v">' + E(x.klineSource || '—') + ' · 截至 ' + E(x.lastDate || '—') + '</span></div>' +
+      '<div class="kv"><span class="k">涨停日校验</span><span class="v">' + E(x.ztSourceNote) + '</span></div>' +
+      '<div class="kv"><span class="k">市场档位</span><span class="v">' + E(m.marketTier || '—') + ' / ' + E(m.marketEmotion || '—') + '</span></div>' +
+      '</div></div></div>';
+  }
+
   /* ─────────────── 页脚 ─────────────── */
   function renderFooter(d) {
     const m = d.meta;
@@ -568,8 +884,12 @@
       '服务端生成时点：' + E(m.generatedAt) + '，耗时 ' + E(m.elapsedMs) + ' ms；北京时间口径 ' + E(m.now);
     $('healthList').innerHTML = (m.health || []).map(h =>
       '<div class="health-item"><span class="hdot' + (h.ok ? '' : ' bad') + '"></span><b>' + E(h.label) + '</b>' +
-      '<span class="muted">' + (h.ok ? '在线 · ' + E(h.rows) + ' 条 · ' + E(h.latency) + 'ms' : '异常 · ' + E(h.error || '未知')) + '</span></div>'
-    ).join('');
+      (h.standby ? '<span class="mini-tag">备用源</span>' : '') +
+      '<span class="muted">' + (h.ok ? '在线 · ' + E(h.rows) + ' 条 · ' + E(h.latency) + 'ms'
+        : (h.standby ? '未启用（主源可用时不调用）' : '异常 · ' + E(h.error || '未知'))) + '</span></div>'
+    ).join('') +
+      ((m.health || []).some(h => h.key === 'qqKline' && !h.ok) && (m.health || []).some(h => h.standby && h.ok)
+        ? '<div class="note-box" style="margin-top:8px">腾讯前复权日K当前不可用，系统已自动切换「新浪财经日K（不复权）」；涉及历史价位的划线可能与前复权口径不一致，相关模块已如实标注口径。</div>' : '');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
