@@ -212,6 +212,12 @@ ul.tight li{margin-bottom:2px}
 @keyframes flashDown{0%{background:#dcf5e9}100%{background:transparent}}
 .flash-up{animation:flashUp 1.1s ease-out}.flash-down{animation:flashDown 1.1s ease-out}
 
+/* lowbuy live ranking */
+.lb-live-summary{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:11px}
+.lb-live-rank{display:inline-block;min-width:20px;height:20px;line-height:20px;text-align:center;border-radius:5px;background:#eef2f7;color:var(--ink2);font-size:11px;font-weight:700}
+.lb-live-rank.top{background:var(--up);color:#fff}
+.lb-live-zone{font-variant-numeric:tabular-nums;white-space:nowrap}
+
 /* relay */
 .relay-cats{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
 .relay-cats .chip{padding:5px 11px;font-size:11.5px}

@@ -473,6 +473,111 @@
   function verdictClass(level) {
     return level === '推荐低吸' ? 'recommend' : (level === '谨慎观察' ? 'watch' : 'no');
   }
+  /* ───────── 实时可低吸排序：把「测算区间」与「当前实时价」对齐 ───────── */
+  function lowBuyLiveRows(d) {
+    const rows = d.lowbuy || [];
+    const out = rows.map(x => {
+      const lb = x.lowBuy, price = Number(x.price);
+      const zone = lb && Array.isArray(lb.zone) ? lb.zone : null;
+      const v = x.verdict || {}, th = x.theme || {};
+      const veto = (v.veto || []).length;
+      const vol = (x.volRatio === null || x.volRatio === undefined) ? null : Number(x.volRatio);
+      const volNote = vol === null ? '量比缺失' : (vol < 0.8 ? '缩量回踩' : vol <= 2 ? '量能温和' : '放量·需辨承接');
+      const volOK = vol === null || vol <= 3;
+      const avg = (x.avgPrice === null || x.avgPrice === undefined || !Number.isFinite(Number(x.avgPrice))) ? null : Number(x.avgPrice);
+      const avgGap = (avg && Number.isFinite(price)) ? +((price - avg) / avg * 100).toFixed(2) : null;
+      if (!zone || !Number.isFinite(price) || price <= 0) {
+        return { ...x, live: { status: '数据不足', rank: 5, gap: null, vol, volNote, avg, avgGap, canAct: false, liveScore: 0, note: '日K或实时价缺失', action: '数据缺失，按纪律宁可等确认' } };
+      }
+      const lo = Number(zone[0]), hi = Number(zone[1]);
+      let status, rank, gap, note, action;
+      if (price < lo) {
+        gap = (lo - price) / price * 100;
+        status = '已破位'; rank = 4;
+        note = '跌破区间下沿 ' + N(gap, 1) + '%';
+        action = '现价已跌破低吸区间下沿，触发「计划失效条件」，回避而非摊低成本';
+      } else if (price > hi) {
+        gap = (price - hi) / price * 100;
+        status = gap <= 2 ? '接近低吸' : '等待回踩';
+        rank = gap <= 2 ? 2 : 3;
+        note = '距上沿还需回踩 ' + N(gap, 1) + '%';
+        action = '尚未进入测算区间，观察是否缩量回踩至 ' + N(lo) + '—' + N(hi) + '，不提前埋伏';
+      } else {
+        gap = 0;
+        const condOK = v.level === '推荐低吸' || v.level === '谨慎观察';
+        const themeOK = th.outlook !== '弱';
+        const vetoOK = veto === 0;
+        if (condOK && themeOK && vetoOK) { status = '可低吸·条件满足'; rank = 0; }
+        else { status = '区间内·条件不足'; rank = 1; }
+        note = '现价位于测算区间内';
+        action = rank === 0
+          ? '价格到位且无一票否决；仍需等分时企稳、缩量不破位确认，不宜仅凭价格执行'
+          : '价格到位，但' + (veto ? veto + ' 项一票否决；' : '') +
+            (v.level === '不推荐' || v.level === '数据不足' ? '综合结论为「' + E(v.level) + '」；' : '') +
+            (th.outlook === '弱' ? '题材预期为「弱」；' : '') + '不建议按区间执行';
+      }
+      const base = { 0: 70, 1: 50, 2: 40, 3: 20, 4: 0, 5: 0 }[rank] || 0;
+      const liveScore = Math.round(Math.max(0, Math.min(100,
+        base + Math.max(0, 20 - (gap || 0) * 2) + (Number(x.techScore) || 0) / 100 * 20
+        + (v.level === '推荐低吸' ? 10 : v.level === '谨慎观察' ? 5 : 0)
+        - (veto ? 10 : 0) - (rank === 4 ? 10 : 0)
+      )));
+      return {
+        ...x,
+        live: {
+          status, rank, gap: gap === null ? null : +gap.toFixed(2), vol, volNote, avg, avgGap,
+          canAct: rank === 0 && volOK, liveScore, note, action, lo, hi,
+          cls: rank === 0 ? 'recommend' : (rank === 1 || rank === 2 ? 'watch' : 'no')
+        }
+      };
+    });
+    out.sort((a, b) => a.live.rank - b.live.rank || (a.live.gap || 0) - (b.live.gap || 0) || b.live.liveScore - a.live.liveScore);
+    return out;
+  }
+
+  function lowBuyLiveHtml(d, list) {
+    const m = d.meta || {};
+    const c = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    list.forEach(x => { c[x.live.rank] = (c[x.live.rank] || 0) + 1; });
+    const trading = m.state === '盘中' || m.state === '集合竞价';
+    const noActionable = c[0] === 0 && c[1] === 0 && c[2] === 0;
+    const head = '<thead><tr><th>#</th><th class="left">代码 / 名称</th><th>现价</th><th>涨跌幅</th><th>均价线</th><th>距均价</th><th>低吸区间</th><th>距上沿</th><th class="left">实时状态</th><th>量比</th><th>技术分</th><th>排序分</th><th class="left">可执行说明</th></tr></thead>';
+    const body = list.map((x, i) => {
+      const L = x.live;
+      return '<tr class="clickable" data-jump="' + E(x.code) + '" title="点击查看该股完整研判卡片">' +
+        '<td><span class="lb-live-rank' + (i < 3 && L.rank <= 2 ? ' top' : '') + '">' + (i + 1) + '</span></td>' +
+        '<td class="left"><span class="code">' + E(x.code) + '</span> <span class="nm">' + E(x.name) + '</span>' +
+        '<div class="small muted">' + E(x.boards) + ' 连板 · ' + E((x.theme && x.theme.name) || x.industry || '无题材') + '</div></td>' +
+        '<td class="' + flashCls(x.code, x.price) + '">' + N(x.price) + '</td>' +
+        '<td>' + PC(x.pct) + '</td>' +
+        '<td>' + (L.avg === null ? '—' : N(L.avg)) + '</td>' +
+        '<td class="' + (L.avgGap !== null && L.avgGap < 0 ? 'down' : '') + '">' + (L.avgGap === null ? '—' : (L.avgGap > 0 ? '+' : '') + N(L.avgGap, 1) + '%') + '</td>' +
+        '<td class="lb-live-zone">' + (L.lo === undefined ? '—' : N(L.lo) + ' — ' + N(L.hi)) + '</td>' +
+        '<td>' + (L.gap === null ? '—' : (L.rank === 4 ? '<span class="down">破位 ' : '') + N(L.gap, 1) + '%' + (L.rank === 4 ? '</span>' : '')) + '</td>' +
+        '<td class="left"><span class="verdict ' + L.cls + '">' + E(L.status) + '</span></td>' +
+        '<td>' + (L.vol === null ? '—' : N(L.vol)) + '<div class="small muted">' + E(L.volNote) + '</div></td>' +
+        '<td>' + E(x.techScore === null ? '—' : x.techScore) + '</td>' +
+        '<td><b class="' + (L.liveScore >= 70 ? 'up' : '') + '">' + E(L.liveScore) + '</b></td>' +
+        '<td class="left small">' + L.action + '</td></tr>';
+    }).join('');
+    return '<div class="sec"><div class="sec-head"><h3>实时可低吸排序</h3>' +
+      src('实时价：腾讯证券快照 ' + (m.quoteTick || m.universeTick || '—') + '；低吸区间：交易日 ' + (m.poolDate || '—') + ' 日线技术位') +
+      '<span class="spacer"></span>' + tag(trading ? '盘中实时' : (m.state || '—'), trading ? 'red' : 'blue') + '</div>' +
+      '<div class="card pad"><div class="lb-live-summary">' +
+      tag('可低吸 ' + c[0], 'red') + tag('区间内·条件不足 ' + c[1], 'warn') + tag('接近低吸 ' + c[2], 'blue') +
+      tag('等待回踩 ' + c[3], '') + tag('已破位 ' + c[4], 'green') + tag('数据不足 ' + c[5], '') +
+      '<span class="small muted" style="margin-left:auto">共 ' + list.length + ' 只连板 · 随全局自动刷新（默认 15 秒）· 点击任意行跳转研判卡片</span></div>' +
+      '<div class="tbl-wrap"><table>' + head + '<tbody>' +
+      (body || '<tr><td colspan="13" class="empty">当前筛选条件下无连板标的</td></tr>') + '</tbody></table></div>' +
+      '<div class="note-box">' +
+      (noActionable ? '<b>当前提示：</b>没有标的进入或接近测算低吸区间（多为封板 / 高位尚未回踩），列表按「距区间上沿回踩幅度」由近到远排序，最上方即最接近低吸位的标的。这是盘面的客观状态，系统不会为了凑出「可低吸」而放宽条件。<br>' : '') +
+      '<b>均价线：</b>腾讯实时快照的分时均价，仅作盘中承接强弱参考；封板时均价通常明显低于现价，贴近均价不等于回踩到波段低吸区间。<br>' +
+      '<b>排序依据：</b>① 实时状态（可低吸 &gt; 区间内条件不足 &gt; 接近低吸 &gt; 等待回踩 &gt; 已破位）；② 距区间上沿的回踩幅度（越小越靠前）；③ 排序分 = 状态基分 + 接近度 + 技术评分 + 推荐等级 − 否决扣减。<b>排序分只用于排序，不是收益预测</b>。「可低吸」要求价格落在测算区间、无一票否决、题材预期不为「弱」、综合结论非「不推荐」；量比仅作参考标签（盘中量比波动大，不作硬门槛），仍需分时缩量企稳确认。<br>' +
+      '<b>口径与时点：</b>低吸区间由交易日 ' + (m.poolDate || '—') + ' 的前复权日K技术位（斐波那契回撤 / MA5 / MA10）机械测算，<b>锚点固定为当日涨停价、不随实时价漂移</b>，否则每次刷新区间会跟着现价移动，永远无法判定「是否回踩到位」；现价取腾讯证券实时快照（' + (m.quoteTick || m.universeTick || '—') + '）。两者盘中比较正是「是否回踩到位」的观察依据，但除权、跳空、涨跌停制度变化会使区间失真。' +
+      (trading ? '' : '<b>当前为' + E(m.state || '非交易时段') + '</b>，价格为最近收盘快照，「可低吸」仅是静态测算状态，不构成盘中实时信号。') +
+      '</div></div></div>';
+  }
+
   function renderLowBuy(d) {
     const rows = d.lowbuy || [], m = d.meta, ov = d.overview;
     const cnt = { '推荐低吸': 0, '谨慎观察': 0, '不推荐': 0, '数据不足': 0 };
@@ -497,7 +602,7 @@
         ['量能', '最新量 / 前5日均量 = ' + N(t.volSurge) + ' 倍'],
         ['位置', t.position + '；' + t.positionNote + '；距60日高 ' + N(t.fromHigh, 1) + '% / 距20日低 ' + N(t.fromLow, 1) + '%'],
         ['支撑位', (t.supports || []).slice(0, 6).map(s => N(s)).join(' / ') || '—'],
-        ['斐波那契', t.fib ? '起涨基准 ' + N(t.fib.base) + ' → 0.382 ' + N(t.fib.f382) + ' / 0.5 ' + N(t.fib.f500) + ' / 0.618 ' + N(t.fib.f618) : '—'],
+        ['斐波那契', t.fib ? '锚点（涨停价）' + N(t.fib.anchor) + ' / 起涨基准 ' + N(t.fib.base) + ' → 0.382 ' + N(t.fib.f382) + ' / 0.5 ' + N(t.fib.f500) + ' / 0.618 ' + N(t.fib.f618) : '—'],
         ['日K样本', (t.bars || 0) + ' 根，截至 ' + E(t.lastDate || '—') + '（' + E(m.klineSource || '腾讯证券日K') + '）']
       ].map(r => '<tr><td>' + E(r[0]) + '</td><td>' + E(r[1]) + '</td></tr>').join('') : '<tr><td colspan="2">' + E(t.reason || '日K数据缺失') + '</td></tr>';
 
@@ -528,7 +633,7 @@
         '<div class="note-box"><b>区间算法：</b>' + E(lb.zoneBasis) + '<br>' + E(lb.note) + '</div>'
         : '<div class="note-box">日K数据不足，无法测算技术位；按 trade-plan 纪律，理由不足时「宁可等确认」，不给低吸区间。</div>';
 
-      return '<div class="lb-card' + (collapsed ? ' lb-collapsed' : '') + '" data-code="' + E(x.code) + '">' +
+      return '<div class="lb-card' + (collapsed ? ' lb-collapsed' : '') + '" id="lbCard_' + E(x.code) + '" data-code="' + E(x.code) + '">' +
         '<div class="lb-head" data-toggle="' + E(x.code) + '">' +
         '<span class="lb-name">' + E(x.name) + '</span><span class="lb-code">' + E(x.code) + '</span>' +
         '<span class="lb-boards">' + E(x.boards) + ' 连板</span>' +
@@ -563,7 +668,9 @@
 
     const scoreItems = rows.slice(0, 12).map(x => ({ name: x.name + '(' + x.code + ')', value: x.techScore || 0, label: x.techScore === null ? '—' : x.techScore }));
 
+    const liveRows = lowBuyLiveRows(d);
     $('pane-lowbuy').innerHTML = summary +
+      lowBuyLiveHtml(d, liveRows) +
       '<div class="sec"><div class="sec-head"><h3>连板股技术评分对比</h3>' + src('本系统技术指标计算，输入为腾讯证券前复权日K') + '</div><div class="card pad"><div id="chartLowScore" class="chart"></div></div></div>' +
       '<div class="sec"><div class="sec-head"><h3>逐只研判（' + rows.length + ' 只）</h3>' + src('东方财富涨停池 + 腾讯证券行情/日K + 新浪财经板块，交易日 ' + (m.poolDate || '—')) + '</div>' +
       (cards || '<div class="card empty">当前筛选条件下无连板标的。可放宽「最低连板数 / 流通市值 / 板块」条件；若为非交易时段，涨停池展示最近一个交易日数据。</div>') + '</div>' +
@@ -574,6 +681,14 @@
         const c = el.dataset.toggle, card = el.closest('.lb-card');
         if (S.collapsed.has(c)) { S.collapsed.delete(c); card.classList.remove('lb-collapsed'); }
         else { S.collapsed.add(c); card.classList.add('lb-collapsed'); }
+      };
+    });
+    $('pane-lowbuy').querySelectorAll('tr[data-jump]').forEach(tr => {
+      tr.onclick = () => {
+        const c = tr.dataset.jump, card = $('lbCard_' + c);
+        if (!card) return;
+        S.collapsed.delete(c); card.classList.remove('lb-collapsed');
+        card.scrollIntoView({ behavior: 'smooth', block: 'start' });
       };
     });
 
