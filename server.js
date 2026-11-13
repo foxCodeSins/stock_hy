@@ -665,7 +665,7 @@ async function buildEnlightenment(query) {
   delete q._; delete q.force;
   const days = Math.min(12, Math.max(5, Number(q.days) || 8));
   const perDay = Math.min(24, Math.max(8, Number(q.perDay) || 12));
-  const minSamples = Math.min(60, Math.max(10, Number(q.minSamples) || 20));
+  const minSamples = Math.min(60, Math.max(5, Number(q.minSamples) || 10));
 
   const [pools, history, universe, indices, boards] = await Promise.all([
     ds.getPools().catch(() => ({ zt: [], zb: [], qs: [], dt: [], date: '' })),

@@ -1835,18 +1835,22 @@
         : j.verdict === 'illiquid' ? tag('流动性偏差', 'warn') : tag('样本不足', 'blue');
 
     const head = '<div class="conclusion card" style="margin-bottom:14px;border-left-color:var(--purple)"><div class="lead">' +
-      '<b>龙场悟道</b>：用 ' + E(m.days || 0) + ' 个交易日（' + E(range) + '）的真实涨停池与次日日K，把 ' +
-      methods.length + ' 种可量化短线方法各跑一遍，按样本门槛与「相对全池基准超额」选优，再把胜出方法映射回当前实时涨停池。' +
+      '<b>龙场悟道 · 次日买入机会计划</b>：用 ' + E(m.days || 0) + ' 个交易日（' + E(range) + '）的真实涨停池，为 ' +
+      methods.length + ' 种选股方法套用同一套计划 —— <b>T 日只选股、T+1 回踩触发才买、T+2 收盘卖出（A 股 T+1）</b>。' +
+      '买入价不是 T 日涨停价，因此不含「次日溢价」偏差；按「每候选期望值＝成交后平均收益 × 触发率」选优，并对当前池输出明日的计划价位。' +
       '<div style="margin-top:7px;font-weight:600">' + E(j.bestReason || '') + '</div></div>' +
-      '<div class="tags">' + verdictTag + tag('样本 ' + totalN + ' 笔', 'blue') +
+      '<div class="tags">' + verdictTag + tag('候选 ' + totalN + ' 次', 'blue') +
+      tag(j.planRules ? j.planRules.label : '次日计划', 'purple') +
       tag('日K源 ' + ksrc, m.fallback ? 'warn' : 'green') +
       tag('交易日 ' + (m.poolDate || '—'), '') + tag('时点 ' + (m.quoteTick || '—'), 'blue') + '</div></div>';
 
     const controls = '<div class="card pad" style="margin-bottom:12px"><div class="small muted">' +
       '回测窗口 <b>' + E((m.baseDates || []).length) + '</b> 个基准日 · 每日候选上限 ' + E(m.perDay) +
-      ' 只 · 日K去重请求 ' + E(m.codesRequested) + ' 只（成功 ' + E(m.klineOk) + '）· 样本门槛 ≥' + E(j.minSamples) +
+      ' 只 · 日K去重请求 ' + E(m.codesRequested) + ' 只（成功 ' + E(m.klineOk) + '）· 成交样本门槛 ≥' + E(j.minSamples) +
       ' 笔 · 服务端耗时 ' + E(m.elapsedMs) + ' ms · 生成 ' + E(m.generatedAt) +
-      (m.fallback ? '<br><b style="color:var(--warn)">当前使用新浪不复权日K</b>：腾讯前复权被限流降级，除权日价格跳变可能污染次日收益，数值可靠性低于前复权口径。' : '') +
+      '<br><b>统一计划模板</b>：' + E(j.planRules ? j.planRules.label : '—') + ' — ' + E(j.planRules ? j.planRules.desc : '—') +
+      '（需要 T+1 与 T+2 两根日K，因此最新 2 个交易日只作「观察中」，不计入分母）' +
+      (m.fallback ? '<br><b style="color:var(--warn)">当前使用新浪不复权日K</b>：腾讯前复权被限流降级，除权日价格跳变可能污染买入价与收益，数值可靠性低于前复权口径。' : '') +
       '</div><div class="dg-actions" style="margin-top:9px"><label class="small muted">回溯 <select class="sel" id="enDays">' +
       [5, 6, 8, 10, 12].map(n => '<option value="' + n + '"' + (Number(S.enOpts.days) === n ? ' selected' : '') + '>近 ' + n + ' 日</option>').join('') +
       '</select></label> <button class="btn btn-primary" id="enReload">重新回测</button>' +
@@ -1864,71 +1868,93 @@
         '<span style="font-size:18px;font-weight:700">' + k[1] + '</span><br><span class="small muted">' + k[2] + '</span></p></div>').join('') +
       '</div></div>';
 
-    const mRows = methods.map(x => '<tr' + (best && x.id === best.id ? ' style="background:#fff8f8"' : '') + '>' +
-      '<td class="left"><b>' + E(x.name) + '</b>' + (x.caveat ? '<div class="small" style="color:var(--warn)">' + E(x.caveat) + '</div>' : '') +
-      '<div class="small muted" style="max-width:290px;white-space:normal">' + E(x.desc) + '</div></td>' +
-      '<td>' + tag(x.kind, x.kind === '基准' ? '' : x.kind === '对照' ? 'warn' : 'blue') + '</td>' +
-      '<td>' + E(x.n) + (x.sampleOK ? '' : ' <span class="mini-tag">样本不足</span>') + '</td>' +
-      '<td class="' + (x.avgRet > 0 ? 'up' : x.avgRet < 0 ? 'down' : '') + '"><b>' + (x.avgRet > 0 ? '+' : '') + N(x.avgRet) + '%</b></td>' +
-      '<td>' + N(x.winRate, 1) + '%</td><td>' + N(x.promoteRate, 1) + '%</td>' +
-      '<td class="up">' + (x.avgMfe > 0 ? '+' : '') + N(x.avgMfe, 1) + '%</td>' +
-      '<td class="down">' + N(x.avgMae, 1) + '%</td>' +
-      '<td>' + (x.profitFactor === null ? '—' : N(x.profitFactor)) + '</td>' +
-      '<td class="' + (x.edge > 0 ? 'up' : x.edge < 0 ? 'down' : '') + '">' + (x.edge === null ? '—' : (x.edge > 0 ? '+' : '') + N(x.edge) + 'pp') + '</td>' +
-      '<td>' + N(x.best, 1) + '% / ' + N(x.worst, 1) + '%</td></tr>').join('');
-    const methodCard = '<div class="sec"><div class="sec-head"><h3>六种方法 · 真实行情回测榜</h3>' +
-      src('东方财富历史涨停池 + 腾讯/新浪日K；T 日分类、T+1 判定，无未来函数') + '</div>' +
+    const mRows = methods.map(x => {
+      const skips = Object.entries(x.skipReasons || {}).sort((a, b) => b[1] - a[1]);
+      return '<tr' + (best && x.id === best.id ? ' style="background:#fff8f8"' : '') + '>' +
+        '<td class="left"><b>' + E(x.name) + '</b>' + (x.caveat ? '<div class="small" style="color:var(--warn)">' + E(x.caveat) + '</div>' : '') +
+        '<div class="small muted" style="max-width:280px;white-space:normal">' + E(x.desc) + '</div></td>' +
+        '<td>' + tag(x.kind, x.kind === '基准' ? '' : x.kind === '对照' ? 'warn' : 'blue') + '</td>' +
+        '<td>' + E(x.n) + '</td>' +
+        '<td>' + N(x.triggerRate, 1) + '%</td>' +
+        '<td>' + E(x.triggered) + (x.sampleOK ? '' : ' <span class="mini-tag">样本不足</span>') + '</td>' +
+        '<td class="' + (x.avgRet > 0 ? 'up' : x.avgRet < 0 ? 'down' : '') + '"><b>' + (x.avgRet > 0 ? '+' : '') + N(x.avgRet) + '%</b></td>' +
+        '<td>' + N(x.winRate, 1) + '%</td>' +
+        '<td class="down">' + N(x.avgMae, 1) + '%</td>' +
+        '<td><b class="' + (x.expectancy > 0 ? 'up' : 'down') + '">' + (x.expectancy > 0 ? '+' : '') + N(x.expectancy) + '%</b></td>' +
+        '<td class="' + (x.edge > 0 ? 'up' : x.edge < 0 ? 'down' : '') + '">' + (x.edge === null ? '—' : (x.edge > 0 ? '+' : '') + N(x.edge) + 'pp') + '</td>' +
+        '<td class="left small">' + (skips.length ? E(skips[0][0]) + ' ×' + skips[0][1] : '—') + '</td></tr>';
+    }).join('');
+    const methodCard = '<div class="sec"><div class="sec-head"><h3>六种方法 · 次日买入计划回测榜</h3>' +
+      src('东方财富历史涨停池 + 腾讯/新浪日K；T 日选股、T+1 触发买入、T+2 收盘卖出，无未来函数') + '</div>' +
       '<div class="card pad" style="margin-bottom:12px"><div id="enMethodChart" class="chart"></div></div>' +
-      '<div class="tbl-wrap"><table><thead><tr><th class="left">方法 / 判定条件</th><th>类型</th><th>样本 n</th><th>平均次日收益</th><th>胜率</th><th>晋级率</th><th>平均 MFE</th><th>平均 MAE</th><th>盈亏比</th><th>超额 vs 基准</th><th>最好/最差</th></tr></thead><tbody>' +
+      '<div class="tbl-wrap"><table><thead><tr><th class="left">方法 / 选股条件</th><th>类型</th><th>候选 n</th><th>触发率</th><th>成交笔数</th><th>成交后平均收益</th><th>胜率</th><th>平均 MAE</th><th>每候选期望</th><th>超额 vs 基准</th><th class="left">主要放弃原因</th></tr></thead><tbody>' +
       (mRows || '<tr><td colspan="11" class="empty">回测区间内无可用样本</td></tr>') + '</tbody></table></div>' +
-      '<div class="note-box" style="margin-top:10px"><b>怎么读：</b>「平均次日收益」= T 日收盘买入、T+1 收盘卖出的理论收益；MFE/MAE 是 T+1 最高/最低价相对 T 收盘的最大浮盈/浮亏；超额 = 该方法平均收益 − 全池基准。样本 n 不同的方法不能直接比高低；样本不足者只作观察项，不参与选优。全部方法都不计手续费、滑点、封板买不进与仓位。</div></div>';
+      '<div class="note-box" style="margin-top:10px"><b>怎么读：</b>所有方法共用同一套「次日回踩低吸」计划，差异只在 T 日选出哪些股。' +
+      '<b>触发率</b>＝T+1 真正给出回踩买点的比例；未触发（高开过度 / 破位 / 没回踩）是「没机会就不做」，不计入收益但计入分母。' +
+      '<b>成交后平均收益</b>＝以 C×0.98 买入、T+2 收盘卖出的平均收益；<b>每候选期望</b>＝成交后平均收益 × 触发率，是本次选优的唯一排序依据。' +
+      'MAE 为成交后 T+1/T+2 最大浮亏。不计手续费、滑点、隔夜跳空与仓位。</div></div>';
 
     const insuff = j.insufficientStrong || [];
     const bestCard = '<div class="sec"><div class="sec-head"><h3>选优结论与待验证观察项</h3></div>' +
       '<div class="grid2"><div class="info-card"><h4>' + (best ? E(best.name) + ' ' + verdictTag : '未产出最佳方法') + '</h4>' +
-      (best ? '<p>' + E(best.desc) + '</p><div class="kv"><span class="k">样本 / 平均收益</span><span class="v">' + E(best.n) + ' 笔 / ' + N(best.avgRet) + '%</span></div>' +
-        '<div class="kv"><span class="k">胜率 / 晋级率</span><span class="v">' + N(best.winRate, 1) + '% / ' + N(best.promoteRate, 1) + '%</span></div>' +
+      (best ? '<p>' + E(best.desc) + '</p><div class="kv"><span class="k">候选 / 实际成交</span><span class="v">' + E(best.n) + ' / ' + E(best.triggered) + ' 笔（触发率 ' + N(best.triggerRate, 1) + '%）</span></div>' +
+        '<div class="kv"><span class="k">成交后平均收益 / 胜率</span><span class="v">' + N(best.avgRet) + '% / ' + N(best.winRate, 1) + '%</span></div>' +
+        '<div class="kv"><span class="k">每候选期望值</span><span class="v"><b>' + N(best.expectancy) + '%</b></span></div>' +
         '<div class="kv"><span class="k">相对基准超额</span><span class="v">' + (best.edge === null ? '—' : (best.edge > 0 ? '+' : '') + N(best.edge) + ' pp') + '</span></div>' +
-        '<div class="kv"><span class="k">风险调整分</span><span class="v">' + N(best.riskAdj) + '</span></div>'
+        '<div class="kv"><span class="k">平均最大浮亏 MAE</span><span class="v">' + N(best.avgMae, 1) + '%</span></div>'
         : '<p>' + E(j.bestReason || '') + '</p>') +
       '<div class="note-box">' + E(j.bestReason || '') + '</div></div>' +
-      '<div class="info-card"><h4>数字更高但样本不足（待验证）</h4>' +
-      (insuff.length ? insuff.map(x => '<div class="kv"><span class="k">' + E(x.name) + '</span><span class="v">' + N(x.avgRet) + '% · n=' + E(x.n) + ' · 胜率 ' + N(x.winRate, 1) + '%</span></div>').join('') +
-        '<div class="note-box">这些方法在本区间数字更高，但样本 &lt;' + E(j.minSamples) + ' 笔，按纪律不参与选优；需要更长回溯窗口或更多样本才能判断，不能据此认定「更好」。</div>'
-        : '<p class="small muted">本区间没有「样本不足但收益显著高于基准」的方法。</p>') +
+      '<div class="info-card"><h4>期望更高但成交样本不足（待验证）</h4>' +
+      (insuff.length ? insuff.map(x => '<div class="kv"><span class="k">' + E(x.name) + '</span><span class="v">期望 ' + N(x.expectancy) + '% · 成交 ' + E(x.triggered) + ' 笔 · 触发率 ' + N(x.triggerRate, 1) + '%</span></div>').join('') +
+        '<div class="note-box">这些方法的每候选期望更高，但成交样本 &lt;' + E(j.minSamples) + ' 笔，按纪律不参与选优；需要更长回溯窗口才能判断，不能据此认定「更好」。</div>'
+        : '<p class="small muted">本区间没有「样本不足但期望显著高于基准」的方法。</p>') +
       '</div></div></div>';
 
-    const cRows = cands.map((x, i) => '<tr>' +
-      '<td>' + (i + 1) + '</td>' +
-      '<td class="left"><span class="code">' + E(x.code) + '</span> <span class="nm">' + E(x.name) + '</span>' +
-      '<div class="small muted">' + E(x.boardLabel || (x.boards + ' 板')) + ' · ' + E(x.industry || '—') + '</div></td>' +
-      '<td>' + N(x.price) + '</td><td>' + PC(x.pct) + '</td>' +
-      '<td>' + E(x.theme ? x.theme.name + ' / ' + x.theme.stage : '—') + '</td>' +
-      '<td>' + N(x.sealFundRatio) + '%</td><td>' + E(x.firstSeal || '—') + '</td><td>' + E(x.brokenCount) + '</td>' +
-      '<td><b class="' + (x.score >= 60 ? 'up' : '') + '">' + E(x.score) + '</b></td>' +
-      '<td class="left small">' + (x.risks.length ? x.risks.map(r => tag(r, 'warn')).join(' ') : tag('无触发式风险', 'green')) + '</td></tr>').join('');
-    const candCard = '<div class="sec"><div class="sec-head"><h3>当前候选 · ' + E(j.candidateMethod ? j.candidateMethod.name : '未选定方法') + ' 映射（' + cands.length + ' 只）</h3>' +
-      src('东方财富最新涨停池 ' + (m.poolDate || '—') + '；实时价 腾讯证券 ' + (m.quoteTick || '—')) + '</div>' +
-      (cands.length ? '<div class="tbl-wrap"><table><thead><tr><th>#</th><th class="left">代码 / 名称</th><th>现价</th><th>涨跌幅</th><th class="left">题材 / 阶段</th><th>封单比</th><th>首封</th><th>炸板</th><th>排序分</th><th class="left">风险标签</th></tr></thead><tbody>' + cRows + '</tbody></table></div>'
-        : '<div class="card empty">最新交易日涨停池中没有符合胜出方法判定条件的标的；系统不降低门槛凑数。</div>') +
-      '<div class="note-box" style="margin-top:10px"><b>候选口径：</b>' + E(j.candidateMethod ? j.candidateMethod.desc : '—') +
-      '。排序分由封单强度、首封时间、炸板次数、题材强度、流通市值与累计板强度量化得出，<b>只用于排序，不是收益预测</b>。这里是「方法在当前池中的映射结果」，不是明日涨跌判断，也不含竞价与盘口数据。' +
-      (j.verdict === 'no-edge' ? '<br><b>重要：</b>胜出方法在本区间并未跑赢「不筛选」的全池基准，因此下方候选<b>不具备方法优势</b>，应视作普通涨停股的观察清单，而非优选推荐。'
-        : (j.verdict === 'insufficient' ? '<br><b>重要：</b>本区间样本不足，未选定最佳方法，下方不生成候选。' : '')) + '</div></div>';
+    const cRows = cands.map((x, i) => {
+      const p = x.plan || {};
+      return '<tr><td>' + (i + 1) + '</td>' +
+        '<td class="left"><span class="code">' + E(x.code) + '</span> <span class="nm">' + E(x.name) + '</span>' +
+        '<div class="small muted">' + E(x.boardLabel || (x.boards + ' 板')) + ' · ' + E(x.industry || '—') +
+        (x.theme ? ' · ' + E(x.theme.stage) : '') + '</div></td>' +
+        '<td>' + N(p.base) + '</td>' +
+        '<td><b class="up">' + N(p.entry) + '</b><div class="small muted">回踩 −2%</div></td>' +
+        '<td class="down">' + N(p.stop) + '<div class="small muted">破位放弃</div></td>' +
+        '<td>' + N(p.maxOpen) + '<div class="small muted">高开放弃</div></td>' +
+        '<td><b class="' + (x.score >= 60 ? 'up' : '') + '">' + E(x.score) + '</b></td>' +
+        '<td class="left small">' + (x.risks.length ? x.risks.map(r => tag(r, 'warn')).join(' ') : tag('无触发式风险', 'green')) + '</td></tr>';
+    }).join('');
+    const steps = (cands[0] && cands[0].planSteps) || [], invalids = (cands[0] && cands[0].invalidations) || [];
+    const candCard = '<div class="sec"><div class="sec-head"><h3>明日买入机会计划 · ' +
+      (j.planFallback ? '全池基准（无方法达标，不做优选）' : E(j.candidateMethod ? j.candidateMethod.name : '未选定方法')) +
+      '（' + cands.length + ' 只）</h3>' +
+      src('东方财富最新涨停池 ' + (m.poolDate || '—') + '；基准价 腾讯证券 ' + (m.quoteTick || '—')) + '</div>' +
+      (cands.length ? '<div class="tbl-wrap"><table><thead><tr><th>#</th><th class="left">代码 / 名称</th><th>今日基准价 C</th><th>回踩买入价</th><th>破位放弃价</th><th>高开放弃价</th><th>排序分</th><th class="left">风险标签</th></tr></thead><tbody>' + cRows + '</tbody></table></div>'
+        : '<div class="card empty">最新交易日涨停池中没有符合胜出方法选股条件的标的；系统不降低门槛凑数。</div>') +
+      (cands.length ? '<div class="grid2" style="margin-top:12px">' +
+        '<div class="info-card"><h4>计划执行步骤（T 日收盘后制定，T+1 才决定是否买）</h4><ul class="tight">' +
+        steps.map(s => '<li>' + E(s) + '</li>').join('') + '</ul></div>' +
+        '<div class="info-card"><h4>未触发 / 失效条件（任一出现即放弃）</h4><ul class="tight">' +
+        invalids.map(s => '<li>' + E(s) + '</li>').join('') + '</ul></div></div>' : '') +
+      '<div class="note-box" style="margin-top:10px"><b>计划口径：</b>上表所有价位仅由「今日收盘价 C」机械推算（C×0.98 / C×0.95 / C×1.05），不含任何明日信息；' +
+      '所有候选共用同一计划模板，差异只在是否符合「' + E(j.candidateMethod ? j.candidateMethod.name : '—') + '」的选股条件。' +
+      '排序分只用于排序，不是收益预测。<b>这是条件化观察清单，不是买入指令</b>；未触发就是「没机会不做」，不追价。' +
+      (j.verdict === 'no-edge' ? '<br><b>重要：</b>胜出方法在本区间并未跑赢「不筛选」的全池基准，下方计划<b>不具备方法优势</b>，应视作普通涨停股的条件观察，而非优选推荐。'
+        : (j.verdict === 'insufficient' ? '<br><b>重要：</b>本区间成交样本不足，未选定最佳方法；下方计划按「全池基准」生成，<b>不做任何优选</b>，只是把同一套次日触发规则套到当日涨停股上，供条件观察。' : '')) + '</div></div>';
 
     const methodDoc = '<div class="sec"><div class="card pad"><div class="sec-head"><h3>回测口径与能力边界</h3></div>' +
       (m.methodology && m.methodology.rules ? m.methodology.rules.map(r => '<div class="pb-step"><b>' + E(r.name) + '</b><span>' + E(r.text) + '</span></div>').join('') : '') +
       '<div class="note-box">' + E((m.methodology && m.methodology.caveat) || '') + '</div>' +
       '<div class="small muted" style="margin-top:8px">数据溯源：' + E(m.dataSourceNote || j.metaNote || '—') +
-      ' · 跳过样本：无日K ' + E((j.skipped || {}).noKline || 0) + ' / 无次日K ' + E((j.skipped || {}).noNextBar || 0) + ' / 无涨停池 ' + E((j.skipped || {}).noPool || 0) + '</div></div></div>';
+      ' · 跳过样本：无日K ' + E((j.skipped || {}).noKline || 0) + ' / 缺 T+1 或 T+2 日K（观察中）' + E((j.skipped || {}).noT2Bar || 0) +
+      ' / 计划参数异常 ' + E((j.skipped || {}).noPlan || 0) + ' / 无涨停池 ' + E((j.skipped || {}).noPool || 0) + '</div></div></div>';
     const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
 
     $('pane-enlighten').innerHTML = head + controls + marketCard + methodCard + bestCard + candCard + methodDoc + disc;
     $('enDays').onchange = e => { S.enOpts.days = Number(e.target.value); loadEnlightenment(true); };
     $('enReload').onclick = () => loadEnlightenment(true);
 
-    const items = methods.slice().sort((a, b) => (Number(a.avgRet) || 0) - (Number(b.avgRet) || 0))
-      .map(x => ({ name: x.name, value: Number(x.avgRet) || 0, label: N(x.avgRet) + '%', kind: x.kind }));
+    const items = methods.slice().sort((a, b) => (Number(a.expectancy) || 0) - (Number(b.expectancy) || 0))
+      .map(x => ({ name: x.name, value: Number(x.expectancy) || 0, label: N(x.expectancy) + '%', kind: x.kind }));
     const opt = {
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       grid: { left: 150, right: 48, top: 10, bottom: 24 },
