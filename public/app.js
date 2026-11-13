@@ -1329,10 +1329,15 @@
     return '<div class="conclusion card dg-head"><div class="lead">「只做龙头」把 ' + E(su.poolCount) +
       ' 只涨停股收敛为 <b>' + E(su.leaderCount) + '</b> 只有明确定位的龙头 / 卡位标的；当前情绪 <b>' + E(s.phase) +
       '</b>（温度 ' + E(s.temperature) + ' / 100，姿态：' + E(s.stance) + '），空间板高度 ' + E(s.maxBoards) + ' 板。' +
+      '候选范围已扩至「连续连板 + N天N板累计涨停」双口径，其中累计板龙 <b>' + E(su.cumLeaderCount || 0) + '</b> 只（近 N 日 M 次涨停的反包型龙头，不再因连续板数低被剔除）。' +
       '<div class="dg-head-sub">核心命题：<b>买在分歧</b>（放量换手后等次日弱转强确认）、<b>卖在一致</b>（缩量加速不追高）。下面是<b>明日盘前观察清单</b>，不是买入名单。</div></div>' +
       '<div class="tags">' + tag('涨停 ' + s.ztCount, 'red') +
       tag('炸板率 ' + dgNum(s.brokenRate, '%'), 'warn') + tag('跌停 ' + s.dtCount, 'green') +
       tag('最高 ' + s.maxBoards + ' 板', 'blue') +
+      tag('累计最高 ' + (su.maxCumBoards || '—') + ' 板', 'blue') +
+      tag('N天N板 ' + (su.cumPoolCount || 0) + ' 只', 'purple') +
+      tag('累计板龙 ' + (su.cumLeaderCount || 0), 'purple') +
+      tag('名称题材 ' + (su.nameThemeCount || 0), 'warn') +
       tag('昨日连板溢价 ' + (s.prevPremium === null ? '—' : (s.prevPremium > 0 ? '+' : '') + s.prevPremium + '%'), s.prevPremium < 0 ? 'green' : 'red') +
       tag('候选 ' + su.shown, 'purple') + '</div></div>';
   }
@@ -1352,14 +1357,14 @@
       '<option value="0"' + (Number(o.showAll) === 0 ? ' selected' : '') + '>仅龙头（只做龙头）</option>' +
       '<option value="1"' + (Number(o.showAll) === 1 ? ' selected' : '') + '>全池对照（含后排）</option></select></label> ' +
       '<label class="small muted">地位 <select class="sel" id="dgRole">' +
-      ['全部', '空间板', '题材龙', '卡位股', '容量中军', '后排/补涨', '孤立涨停'].map(r =>
+      ['全部', '空间板', '累计板龙', '题材龙', '卡位股', '容量中军', '后排/补涨', '孤立涨停'].map(r =>
         '<option value="' + E(r) + '"' + (o.role === r ? ' selected' : '') + '>' + E(r) + '</option>').join('') +
       '</select></label> ' +
       '<label class="small muted">回溯 <select class="sel" id="dgDays">' +
       [7, 10, 12, 15].map(n => '<option value="' + n + '"' + (Number(o.days) === n ? ' selected' : '') + '>近 ' + n + ' 日</option>').join('') +
       '</select></label> ' +
       '<label class="small muted">排序 <select class="sel" id="dgSort">' +
-      [['score', '观察优先级'], ['boards', '连板高度'], ['divergence', '分歧度'], ['consensus', '一致度'], ['amount', '成交额']]
+      [['score', '观察优先级'], ['boards', '连续连板'], ['cumBoards', '累计板数'], ['divergence', '分歧度'], ['consensus', '一致度'], ['amount', '成交额']]
         .map(p => '<option value="' + p[0] + '"' + (o.sort === p[0] ? ' selected' : '') + '>' + E(p[1]) + '</option>').join('') +
       '</select></label> ' +
       '<button class="btn" id="dgMethod">' + (S.dgMethodOpen ? '收起' : '查看') + '打法口径</button>' +
@@ -1424,6 +1429,31 @@
       '<div class="note-box">阶段由近 5 日该行业涨停家数序列、最高板变化与今日一字占比判定；东财行业分类较细，「孤立涨停」偏多是分类口径的结果，可能与市场俗称题材不同。</div></div>';
   }
 
+  function dgThemeUnderstandingCard(j) {
+    const nt = j.nameThemes || [], cp = j.conceptThemes || [], info = j.themeUnderstanding || {};
+    const ntHtml = nt.length
+      ? '<div class="grid2">' + nt.slice(0, 8).map(t =>
+        '<div class="info-card theme-card"><h4>' + E(t.label) + ' ' + tag(t.kind, t.kind === '玄学名字' ? 'purple' : 'blue') + '</h4>' +
+        '<div class="theme-meta">' + tag(t.group, 'purple') + tag(t.count + ' 只涨停', 'red') +
+        tag('最高 ' + t.maxBoards + ' 连板', '') + tag('累计最高 ' + t.maxCum + ' 板', 'blue') + '</div>' +
+        '<p><b>成分股：</b>' + E(t.names.join('、')) + '</p>' +
+        '<p style="margin-top:5px"><b>梯队：</b>' + (t.leaders || []).map(l => E(l.name) + '（' + E(l.label) + '）').join('、') + '</p>' +
+        '<div class="note-box"><b>识别依据：</b>' + E(t.basis) + '<br><b>边界：</b>' + E(t.caveat) + '</div></div>'
+      ).join('') + '</div>'
+      : '<div class="card empty">当日涨停股名称未出现符合阈值的字面共振（玄学 / 名字主线未识别到，不代表市场没有，仅说明字面证据不足）</div>';
+    const cpHtml = cp.length
+      ? '<div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th class="left">概念板块</th><th>涨停数</th><th>最高连板</th><th>累计最高</th><th class="left">成分股</th></tr></thead><tbody>' +
+        cp.map(c => '<tr><td class="left"><b>' + E(c.name) + '</b></td><td>' + E(c.count) + '</td><td>' + E(c.maxBoards) + '</td><td>' + E(c.maxCum) + '</td><td class="left small">' + E(c.names.join('、')) + '</td></tr>').join('') +
+        '</tbody></table></div>'
+      : '<div class="card empty" style="margin-top:10px">当日涨幅居前的概念板块中，未出现 ≥2 只成分股同时涨停</div>';
+    return '<div class="card pad dg-card"><div class="dg-card-head"><h4>题材理解补充 · 名称 / 玄学共振与跨行业概念</h4>' +
+      src('新浪财经概念板块成分映射（' + E(j.meta.conceptBoardCount || 0) + ' 个板块）＋ 涨停股名称字面聚类；交易日 ' + E(j.meta.poolDate || '—')) + '</div>' +
+      '<div class="note-box" style="margin-bottom:12px">' + E(info.note || '') + '<br><b>能力边界：</b>' + E(info.caveat || '') + '</div>' +
+      '<div class="dg-h5">① 名称 / 玄学字面共振（' + E(nt.length) + ' 组）</div>' + ntHtml +
+      '<div class="dg-h5" style="margin-top:14px">② 跨行业概念板块归属（' + E(cp.length) + ' 组）</div>' + cpHtml +
+      '</div>';
+  }
+
   function dgValidationCard(j) {
     const v = j.validation || {};
     const emptyRate = () => ({ n: 0, promoted: 0, rate: null });
@@ -1455,7 +1485,7 @@
       '<div class="dg-item-top"><b>' + E(x.name) + '</b><span class="code muted">' + E(x.code) + '</span>' +
       '<span class="tag ' + dgDtypeCls(x.dtype) + '">' + E(x.dtype) + '</span>' +
       '<span class="dg-score">' + E(x.score) + '</span></div>' +
-      '<div class="dg-item-mid"><span>' + E(x.boards) + ' 板</span><span class="tag ' + (x.roleRank === 1 ? 'red' : 'blue') + '">' + E(x.role) + '</span>' +
+      '<div class="dg-item-mid"><span title="连续连板 / 近 N 日累计涨停">' + E(x.boardLabel || (x.boards + ' 板')) + '</span><span class="tag ' + (x.roleRank === 1 ? 'red' : 'blue') + '">' + E(x.role) + '</span>' +
       '<span class="muted">' + E(x.industry) + '</span></div>' +
       '<div class="dg-mini-meters"><span>一致 ' + E(x.consensus) + '</span>' + dgBar(x.consensus, 'blue') +
       '<span>分歧 ' + E(x.divergence) + '</span>' + dgBar(x.divergence, 'red') + '</div>' +
@@ -1464,7 +1494,7 @@
 
   function dgDetailHead(x) {
     return '<div class="card pad dg-detail-head"><div class="dg-dh-top"><h3>' + E(x.name) + ' <span class="muted" style="font-size:12px;font-weight:400">' + E(x.code) + '</span></h3>' +
-      tag(x.boards + ' 板', 'red') + tag(x.role, 'blue') + tag(x.dtype, dgDtypeCls(x.dtype)) +
+      tag(x.boardLabel || (x.boards + ' 板'), 'red') + tag(x.role, 'blue') + tag(x.dtype, dgDtypeCls(x.dtype)) +
       tag('观察优先级 ' + x.score, 'purple') + '<span class="muted small">' + E(x.industry) + ' · ' + E(x.board) + '</span></div>' +
       '<div class="dg-dh-reason"><b>地位依据：</b>' + E(x.roleReason) + '</div>' +
       '<div class="dg-kv-grid">' +
@@ -1473,7 +1503,10 @@
       dgKv('炸板次数', E(x.brokenCount) + ' 次') + dgKv('封单/流通市值', N(x.sealFundRatio) + '%') +
       dgKv('换手率', N(x.turnover) + '%') + dgKv('成交额', AMT(x.amount)) +
       dgKv('流通市值', CAP(x.floatCap)) + dgKv('近期涨停', (x.statDays === null || x.statDays === undefined ? '—' : E(x.statDays) + ' 天 ' + E(x.statCount) + ' 板')) +
+      dgKv('累计涨停密度', x.cumDensity === null || x.cumDensity === undefined ? '—' : N(x.cumDensity) + ' 板/日') +
       dgKv('封单额', AMT(x.sealFund)) + dgKv('所属题材阶段', x.theme ? E(x.theme.stage) + ' / 强度 ' + E(x.theme.strength) : '—') +
+      dgKv('名称 / 玄学题材', (x.nameThemes || []).length ? E(x.nameThemes.join('、')) : '—') +
+      dgKv('概念板块题材', (x.conceptThemes || []).length ? E(x.conceptThemes.join('、')) : '—') +
       '</div><div class="dg-trace">' + src(x.sourceNote) + '</div></div>';
   }
   function dgKv(k, v) { return '<div class="dg-kv"><span>' + E(k) + '</span><b>' + v + '</b></div>'; }
@@ -1543,11 +1576,12 @@
     const excl = (j.excluded || []).length && Number(S.dgOpts.showAll) === 0
       ? '<div class="card pad dg-card dg-excluded"><div class="dg-h5">「只做龙头」纪律剔除（' + E(j.excluded.length) + ' 只，仅作对照）</div>' +
       '<div class="dg-excl-tags">' + j.excluded.slice(0, 18).map(x =>
-        '<span class="tag" title="' + E(x.roleReason) + '">' + E(x.name) + ' ' + E(x.boards) + '板 · ' + E(x.role) + '</span>').join('') +
+        '<span class="tag" title="' + E(x.roleReason) + '">' + E(x.name) + ' ' + E(x.boardLabel || (x.boards + '板')) + ' · ' + E(x.role) + '</span>').join('') +
       (j.excluded.length > 18 ? '<span class="small muted">等共 ' + E(j.excluded.length) + ' 只</span>' : '') + '</div></div>' : '';
     const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
     $('pane-dragon').innerHTML = dgHead(j) + dgSource(j) + dgSentimentCard(j) +
       '<div class="dg-grid2">' + dgLadderCard(j) + dgThemesCard(j) + '</div>' +
+      dgThemeUnderstandingCard(j) +
       focus + dgValidationCard(j) + dgMethodCard(j) + body + excl + disc;
 
     $('dgReload').onclick = () => loadDragon(true);

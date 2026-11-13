@@ -560,11 +560,39 @@ async function buildDragon(query) {
   delete f._; delete f.force;
   const days = Math.min(15, Math.max(5, Number(f.days) || 12));
 
-  const [pools, history, indices] = await Promise.all([
+  const [pools, history, indices, sectorBoards] = await Promise.all([
     ds.getPools().catch(() => ({ zt: [], zb: [], qs: [], dt: [], date: '' })),
     ds.getPoolFullHistory(days).catch(() => ({ dates: [], byDate: {}, note: '' })),
-    ds.getIndices().catch(() => [])
+    ds.getIndices().catch(() => []),
+    ds.getSectorBoards().catch(() => ({ industry: [], concept: [] }))
   ]);
+
+  // 题材理解补充：取当日涨幅居前的概念 / 行业板块，建立「成分股代码 → 板块名」映射
+  // （东财 hybk 只有行业分类，覆盖不到跨行业概念与名称炒作）
+  const byPct = (a, b) => (Number(b.pct) || 0) - (Number(a.pct) || 0);
+  const allBoards = [...(sectorBoards.concept || []), ...(sectorBoards.industry || [])];
+  // 盘前 / 收盘后板块涨跌幅全为 0，此时按涨幅排序只是列表默认顺序，选不出当日相关概念。
+  // 因此混合三种选题：涨幅居前 + 与涨停股东财行业名相关的板块 + 成分覆盖面大的板块。
+  const pctValid = allBoards.some(b => Number(b.pct) !== 0);
+  const ztInds = [...new Set((pools.zt || []).map(x => String(x.industry || '').replace(/[ⅡⅢⅠ].*$/, '').trim()).filter(Boolean))];
+  const related = allBoards.filter(b => {
+    const bn = String(b.name).replace(/行业|板块|概念/g, '').trim();
+    return bn && ztInds.some(ind => bn.includes(ind.slice(0, 2)) || ind.includes(bn.slice(0, 2)));
+  }).slice(0, 8);
+  const hot = pctValid ? [...allBoards].sort(byPct).slice(0, 8) : [];
+  const broad = allBoards.filter(b => Number(b.members) >= 60)
+    .sort((a, b) => (Number(b.members) || 0) - (Number(a.members) || 0)).slice(0, 4);
+  const topBoards = [...new Map([...related, ...hot, ...broad].map(b => [b.node, b])).values()].slice(0, 16);
+  // 分批并发，避免一次性向新浪板块接口打出几十个请求触发限流
+  const memberSets = await limitedMap(topBoards, 4, async b => {
+    try { return { name: b.name, set: await ds.getSectorMembers(b.node) }; }
+    catch (e) { return null; }
+  });
+  const conceptMap = {};
+  memberSets.forEach(m => {
+    if (!m || !m.set || !m.set.size) return;
+    m.set.forEach(c => { (conceptMap[c] = conceptMap[c] || []).push(m.name); });
+  });
 
   // 上一交易日涨停股今日真实溢价：腾讯实时快照（历史池只提供名单，不提供今日涨跌）
   const prevDate = (history.dates || [])[1] && history.dates[1].date;
@@ -577,7 +605,7 @@ async function buildDragon(query) {
     excludeST: f.excludeST, sort: f.sort, sortDir: f.sortDir, limit: f.limit,
     showAll: f.showAll, role: f.role, days
   };
-  const g = an.dragonGame({ pools, history, quotes, indices, options });
+  const g = an.dragonGame({ pools, history, quotes, indices, options, conceptMap });
 
   const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
   const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;
@@ -602,7 +630,8 @@ async function buildDragon(query) {
     emptyReason: !(pools.zt || []).length
       ? '东方财富涨停池当前返回空名单（可能是非交易时段、上游临时不可用或当日无涨停），系统不会用推测数据填充。'
       : null,
-    dataSourceNote: g.metaNote + '；实时溢价快照时点 ' + (quoteTick || '—') + '；指数：腾讯证券。',
+    conceptBoardCount: topBoards.length,
+    dataSourceNote: g.metaNote + '；实时溢价快照时点 ' + (quoteTick || '—') + '；指数：腾讯证券；题材理解补充：新浪财经概念 / 行业板块成分映射（' + topBoards.length + ' 个板块）与涨停股名称字面聚类。',
     disclaimer: DISCLAIMER
   };
   return { meta, ...g };
