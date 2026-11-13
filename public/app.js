@@ -1786,13 +1786,15 @@
       '行业 / 概念板块：新浪财经板块行情<br>' +
       '服务端生成时点：' + E(m.generatedAt) + '，耗时 ' + E(m.elapsedMs) + ' ms；北京时间口径 ' + E(m.now);
     $('healthList').innerHTML = (m.health || []).map(h =>
-      '<div class="health-item"><span class="hdot' + (h.ok ? '' : ' bad') + '"></span><b>' + E(h.label) + (h.sourceLabel ? ' · ' + E(h.sourceLabel) : '') + '</b>' +
+      '<div class="health-item"><span class="hdot' + (h.ok ? '' : (h.degraded ? ' warn' : ' bad')) + '"></span><b>' + E(h.label) + (h.sourceLabel ? ' · ' + E(h.sourceLabel) : '') + '</b>' +
       (h.standby ? '<span class="mini-tag">备用源</span>' : '') +
+      (h.degraded ? '<span class="mini-tag" style="color:var(--warn)">已降级</span>' : '') +
       '<span class="muted">' + (h.ok ? '在线 · ' + E(h.rows) + ' 条 · ' + E(h.latency) + 'ms'
-        : (h.standby ? '未启用（主源可用时不调用）' : '异常 · ' + E(h.error || '未知'))) + '</span></div>'
+        : (h.degraded ? '降级 · ' + E(h.error || '备用源接管')
+          : (h.standby ? '未启用（主源可用时不调用）' : '异常 · ' + E(h.error || '未知')))) + '</span></div>'
     ).join('') +
-      ((m.health || []).some(h => h.key === 'qqKline' && !h.ok) && (m.health || []).some(h => h.standby && h.ok)
-        ? '<div class="note-box" style="margin-top:8px">腾讯前复权日K当前不可用，系统已自动切换「新浪财经日K（不复权）」；涉及历史价位的划线可能与前复权口径不一致，相关模块已如实标注口径。</div>' : '');
+      ((m.health || []).some(h => h.key === 'qqKline' && (h.degraded || !h.ok)) && (m.health || []).some(h => h.standby && h.ok)
+        ? '<div class="note-box" style="margin-top:8px"><b>日K口径提示：</b>腾讯前复权日K被 WAF 限流，系统已自动切换「新浪财经日K（不复权）」并进入 2 分钟冷却，冷却结束后自动探活恢复前复权口径。使用备用源期间，历史价位划线、支撑位与回撤测算可能与前复权口径不一致，相关模块已如实标注；请以交易所行情为准。</div>' : '');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
