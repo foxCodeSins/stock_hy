@@ -656,6 +656,103 @@ async function getDragon(query, force) {
   return dragonCache.inflight;
 }
 
+/* ─────────── 龙场悟道 · 多方法回测选优 ─────────── */
+const enlightenCache = { at: 0, key: '', value: null, inflight: null };
+
+async function buildEnlightenment(query) {
+  const t0 = Date.now();
+  const q = { ...query };
+  delete q._; delete q.force;
+  const days = Math.min(12, Math.max(5, Number(q.days) || 8));
+  const perDay = Math.min(24, Math.max(8, Number(q.perDay) || 12));
+  const minSamples = Math.min(60, Math.max(10, Number(q.minSamples) || 20));
+
+  const [pools, history, universe, indices, boards] = await Promise.all([
+    ds.getPools().catch(() => ({ zt: [], zb: [], qs: [], dt: [], date: '' })),
+    ds.getPoolFullHistory(days + 2).catch(() => ({ dates: [], byDate: {}, note: '' })),
+    ds.getUniverse().catch(() => ({ list: [], count: 0, expected: 0, asOf: new Date().toISOString() })),
+    ds.getIndices().catch(() => []),
+    ds.getSectorBoards().catch(() => ({ industry: [], concept: [] }))
+  ]);
+
+  const ov = an.marketOverview(universe, indices, pools);
+  const themes = an.buildThemes(pools, boards);
+  const allDates = (history.dates || []).map(d => d.date);
+  const baseDates = allDates.slice(0, days);
+  const byDate = history.byDate || {};
+
+  // 当前实时快照：候选展示用
+  const nowCodes = (pools.zt || []).map(x => x.code);
+  const quotes = nowCodes.length ? await ds.getQQQuotes(nowCodes).catch(() => ({})) : {};
+
+  // 历史候选代码去重：每个基准日按成交额取前 perDay 只，控制日K请求量
+  const codeStat = new Map();
+  for (const d of baseDates) {
+    const zt = (byDate[d] && byDate[d].zt) || [];
+    zt.slice().sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, perDay)
+      .forEach(x => {
+        if (!x || !x.code) return;
+        const s = codeStat.get(x.code) || { code: x.code, hits: 0, amount: 0 };
+        s.hits++; s.amount = Math.max(s.amount, Number(x.amount) || 0);
+        codeStat.set(x.code, s);
+      });
+  }
+  const codes = [...codeStat.values()].sort((a, b) => b.hits - a.hits || b.amount - a.amount)
+    .slice(0, 120).map(x => x.code);
+  // 低并发 + 批间微延迟：回测一次会请求上百只日K，瞬时高并发出触发腾讯 WAF 限流，
+  // 进而把整个系统降级到不复权口径。已有缓存的代码不会重复请求。
+  const kdata = await limitedMap(codes, 2, async c => {
+    const r = await ds.getKlineData(c, 120).catch(() => null);
+    await new Promise(res => setTimeout(res, 40));
+    return r;
+  });
+  const kByCode = new Map();
+  codes.forEach((c, i) => {
+    if (kdata[i] && kdata[i].rows && kdata[i].rows.length) {
+      kByCode.set(c, { rows: kdata[i].rows, source: kdata[i].source, adjusted: kdata[i].adjusted });
+    }
+  });
+
+  const g = an.enlightenmentBacktest({
+    history, kByCode, baseDates, pools, quotes, overview: ov, themes, minSamples
+  });
+
+  const klineSources = [...new Set([...kByCode.values()].map(k => k.source).filter(Boolean))];
+  const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
+  const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;
+  const quoteTick = latestQT && String(latestQT).length >= 14
+    ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14) : null;
+
+  const meta = {
+    ...beijingNow(), generatedAt: new Date().toISOString(), elapsedMs: Date.now() - t0,
+    poolDate: pools.date || null, quoteTick, days, perDay, minSamples,
+    historyDays: allDates.length, historyRange: [allDates[allDates.length - 1] || null, allDates[0] || null],
+    baseDates, codesRequested: codes.length, klineOk: kByCode.size, klineSources,
+    fallback: klineSources.some(s => /新浪/.test(s)),
+    health: ds.getHealth(), port: ACTIVE_PORT,
+    methodology: an.ENLIGHTEN_METHOD,
+    empty: !baseDates.length,
+    emptyReason: !baseDates.length ? '东方财富历史涨停池未返回可用交易日，无法回测；系统不填充推测数据。' : null,
+    dataSourceNote: g.metaNote,
+    disclaimer: DISCLAIMER
+  };
+  return { meta, ...g };
+}
+
+async function getEnlightenment(query, force) {
+  const key = JSON.stringify({ days: query.days || '', perDay: query.perDay || '', minSamples: query.minSamples || '' });
+  if (!force && enlightenCache.value && enlightenCache.key === key && Date.now() - enlightenCache.at < 600000) return enlightenCache.value;
+  if (enlightenCache.inflight) return enlightenCache.inflight;
+  enlightenCache.inflight = (async () => {
+    try {
+      const v = await buildEnlightenment(query);
+      enlightenCache.value = v; enlightenCache.key = key; enlightenCache.at = Date.now();
+      return v;
+    } finally { enlightenCache.inflight = null; }
+  })();
+  return enlightenCache.inflight;
+}
+
 /* ─────────── 路由 ─────────── */
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost:' + ACTIVE_PORT);
@@ -703,6 +800,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/pullback') return sendJson(res, await getPullback(q, q.force === '1'));
     if (u.pathname === '/api/backtest') return sendJson(res, await getBacktest(q, q.force === '1'));
     if (u.pathname === '/api/dragon') return sendJson(res, await getDragon(q, q.force === '1'));
+    if (u.pathname === '/api/enlightenment') return sendJson(res, await getEnlightenment(q, q.force === '1'));
     if (u.pathname === '/api/health') return sendJson(res, { ...beijingNow(), port: ACTIVE_PORT, health: ds.getHealth(), ai: aiStatus(), disclaimer: DISCLAIMER });
     if (u.pathname === '/api/boards') return sendJson(res, await ds.getSectorBoards());
     if (u.pathname === '/api/pools') return sendJson(res, await ds.getPools());

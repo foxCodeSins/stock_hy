@@ -34,7 +34,8 @@
     dg: null, dgLoading: false, dgError: null, dgAt: 0, dgSelected: null, dgFilters: '',
     dgMethodOpen: false, dgValidationOpen: false,
     dgOpts: { days: 12, showAll: 0, sort: 'score', sortDir: 'desc', role: '全部', limit: 60 },
-    dgOfflineTimer: null
+    dgOfflineTimer: null,
+    en: null, enLoading: false, enError: null, enOpts: { days: 8 }
   };
   const activeHealth = m => (m.health || []).filter(h => !h.standby);
 
@@ -77,7 +78,7 @@
     });
     loadBoards();
     const initTab = new URLSearchParams(location.search).get('tab');
-    if (initTab && ['review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'dragon'].indexOf(initTab) >= 0) switchTab(initTab);
+    if (initTab && ['review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'dragon', 'enlighten'].indexOf(initTab) >= 0) switchTab(initTab);
     refresh(true);
     startTimer();
   }
@@ -205,9 +206,10 @@
   function switchTab(t) {
     S.tab = t;
     [...$('tabs').children].forEach(c => c.classList.toggle('active', c.dataset.tab === t));
-    ['review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'dragon'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
+    ['review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'dragon', 'enlighten'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
     if (t === 'pullback' && !S.pull && !S.pullLoading) loadPullback(false);
     if (t === 'dragon' && !S.dg && !S.dgLoading) loadDragon(false);
+    if (t === 'enlighten' && !S.en && !S.enLoading) loadEnlightenment(false);
     setTimeout(() => { Object.values(S.charts || {}).forEach(c => { try { c.resize(); } catch (e) { } }); }, 60);
   }
 
@@ -231,6 +233,7 @@
     $('badgeRelay').textContent = ((d.relay && d.relay.list) || []).length;
     $('badgeAI').textContent = m.aiConfigured ? '已接模型' : '本地';
     if (S.pull) $('badgePull').textContent = (S.pull.list || []).length;
+    if (S.en) $('badgeEn').textContent = (S.en.best ? String(S.en.best.name).slice(0, 6) : '已回测');
   }
 
   function renderMeta(m, ov) {
@@ -1795,6 +1798,149 @@
     ).join('') +
       ((m.health || []).some(h => h.key === 'qqKline' && (h.degraded || !h.ok)) && (m.health || []).some(h => h.standby && h.ok)
         ? '<div class="note-box" style="margin-top:8px"><b>日K口径提示：</b>腾讯前复权日K被 WAF 限流，系统已自动切换「新浪财经日K（不复权）」并进入 2 分钟冷却，冷却结束后自动探活恢复前复权口径。使用备用源期间，历史价位划线、支撑位与回撤测算可能与前复权口径不一致，相关模块已如实标注；请以交易所行情为准。</div>' : '');
+  }
+
+  /* ─────────────── 龙场悟道 · 多方法回测选优 ─────────────── */
+  async function loadEnlightenment(force) {
+    if (S.enLoading) return;
+    S.enLoading = true;
+    if (!S.en) $('pane-enlighten').innerHTML = '<div class="card empty">正在回放近 ' + S.enOpts.days +
+      ' 个交易日涨停池、逐只核对次日真实日K，比较六种可量化短线方法…</div>';
+    const q = new URLSearchParams({ days: S.enOpts.days });
+    if (force) q.set('force', '1');
+    try {
+      const r = await fetch('/api/enlightenment?' + q.toString(), { cache: 'no-store' });
+      const j = await r.json();
+      if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+      S.en = j; S.enError = null;
+      renderEnlightenment();
+      $('badgeEn').textContent = j.best ? String(j.best.name).slice(0, 6) : '已回测';
+    } catch (e) {
+      S.enError = e.message;
+      $('pane-enlighten').innerHTML = '<div class="card empty"><b>回测未完成：' + E(e.message) +
+        '</b><br><span class="small muted">系统不会用推测数据填充，可点下方按钮重试。</span></div>' +
+        '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="enRetry">重新回测</button></div>';
+      $('enRetry').onclick = () => loadEnlightenment(true);
+    } finally { S.enLoading = false; }
+  }
+
+  function renderEnlightenment() {
+    const j = S.en; if (!j) return;
+    const m = j.meta || {}, methods = j.methods || [], best = j.best, mk = j.market || {}, cands = j.candidates || [];
+    const ksrc = (m.klineSources || []).join(' / ') || '—';
+    const range = (m.historyRange || []).filter(Boolean).join(' — ') || '—';
+    const totalN = methods.reduce((s, x) => s + (Number(x.n) || 0), 0);
+    const verdictTag = j.verdict === 'edge' ? tag('区间内有超额', 'red')
+      : j.verdict === 'no-edge' ? tag('无显著超额', 'warn')
+        : j.verdict === 'illiquid' ? tag('流动性偏差', 'warn') : tag('样本不足', 'blue');
+
+    const head = '<div class="conclusion card" style="margin-bottom:14px;border-left-color:var(--purple)"><div class="lead">' +
+      '<b>龙场悟道</b>：用 ' + E(m.days || 0) + ' 个交易日（' + E(range) + '）的真实涨停池与次日日K，把 ' +
+      methods.length + ' 种可量化短线方法各跑一遍，按样本门槛与「相对全池基准超额」选优，再把胜出方法映射回当前实时涨停池。' +
+      '<div style="margin-top:7px;font-weight:600">' + E(j.bestReason || '') + '</div></div>' +
+      '<div class="tags">' + verdictTag + tag('样本 ' + totalN + ' 笔', 'blue') +
+      tag('日K源 ' + ksrc, m.fallback ? 'warn' : 'green') +
+      tag('交易日 ' + (m.poolDate || '—'), '') + tag('时点 ' + (m.quoteTick || '—'), 'blue') + '</div></div>';
+
+    const controls = '<div class="card pad" style="margin-bottom:12px"><div class="small muted">' +
+      '回测窗口 <b>' + E((m.baseDates || []).length) + '</b> 个基准日 · 每日候选上限 ' + E(m.perDay) +
+      ' 只 · 日K去重请求 ' + E(m.codesRequested) + ' 只（成功 ' + E(m.klineOk) + '）· 样本门槛 ≥' + E(j.minSamples) +
+      ' 笔 · 服务端耗时 ' + E(m.elapsedMs) + ' ms · 生成 ' + E(m.generatedAt) +
+      (m.fallback ? '<br><b style="color:var(--warn)">当前使用新浪不复权日K</b>：腾讯前复权被限流降级，除权日价格跳变可能污染次日收益，数值可靠性低于前复权口径。' : '') +
+      '</div><div class="dg-actions" style="margin-top:9px"><label class="small muted">回溯 <select class="sel" id="enDays">' +
+      [5, 6, 8, 10, 12].map(n => '<option value="' + n + '"' + (Number(S.enOpts.days) === n ? ' selected' : '') + '>近 ' + n + ' 日</option>').join('') +
+      '</select></label> <button class="btn btn-primary" id="enReload">重新回测</button>' +
+      '<span class="small muted">回测按 10 分钟缓存；切换天数或点击按钮会强制重算</span></div></div>';
+
+    const kpis = [
+      ['涨停 / 跌停', E(mk.limitUp) + ' / ' + E(mk.limitDown), '炸板 ' + E(mk.broken) + ' 家 · 率 ' + N(mk.breakRate, 1) + '%'],
+      ['涨跌家数', E(mk.up) + ' / ' + E(mk.down), '广度 ' + N(mk.breadth, 1) + '%'],
+      ['最高连板', E(mk.maxBoard) + ' 板', '市场档位 ' + E(mk.tier) + ' / 情绪 ' + E(mk.emotion)],
+      ['指数均值', (Number(mk.idxAvg) > 0 ? '+' : '') + N(mk.idxAvg) + '%', '6 大指数当日均值']
+    ];
+    const marketCard = '<div class="sec"><div class="sec-head"><h3>最近市场情况</h3>' +
+      src('新浪财经全市场快照 / 腾讯证券指数 / 东方财富涨停池，交易日 ' + (mk.poolDate || m.poolDate || '—')) + '</div>' +
+      '<div class="grid4">' + kpis.map(k => '<div class="info-card"><h4>' + k[0] + '</h4><p>' +
+        '<span style="font-size:18px;font-weight:700">' + k[1] + '</span><br><span class="small muted">' + k[2] + '</span></p></div>').join('') +
+      '</div></div>';
+
+    const mRows = methods.map(x => '<tr' + (best && x.id === best.id ? ' style="background:#fff8f8"' : '') + '>' +
+      '<td class="left"><b>' + E(x.name) + '</b>' + (x.caveat ? '<div class="small" style="color:var(--warn)">' + E(x.caveat) + '</div>' : '') +
+      '<div class="small muted" style="max-width:290px;white-space:normal">' + E(x.desc) + '</div></td>' +
+      '<td>' + tag(x.kind, x.kind === '基准' ? '' : x.kind === '对照' ? 'warn' : 'blue') + '</td>' +
+      '<td>' + E(x.n) + (x.sampleOK ? '' : ' <span class="mini-tag">样本不足</span>') + '</td>' +
+      '<td class="' + (x.avgRet > 0 ? 'up' : x.avgRet < 0 ? 'down' : '') + '"><b>' + (x.avgRet > 0 ? '+' : '') + N(x.avgRet) + '%</b></td>' +
+      '<td>' + N(x.winRate, 1) + '%</td><td>' + N(x.promoteRate, 1) + '%</td>' +
+      '<td class="up">' + (x.avgMfe > 0 ? '+' : '') + N(x.avgMfe, 1) + '%</td>' +
+      '<td class="down">' + N(x.avgMae, 1) + '%</td>' +
+      '<td>' + (x.profitFactor === null ? '—' : N(x.profitFactor)) + '</td>' +
+      '<td class="' + (x.edge > 0 ? 'up' : x.edge < 0 ? 'down' : '') + '">' + (x.edge === null ? '—' : (x.edge > 0 ? '+' : '') + N(x.edge) + 'pp') + '</td>' +
+      '<td>' + N(x.best, 1) + '% / ' + N(x.worst, 1) + '%</td></tr>').join('');
+    const methodCard = '<div class="sec"><div class="sec-head"><h3>六种方法 · 真实行情回测榜</h3>' +
+      src('东方财富历史涨停池 + 腾讯/新浪日K；T 日分类、T+1 判定，无未来函数') + '</div>' +
+      '<div class="card pad" style="margin-bottom:12px"><div id="enMethodChart" class="chart"></div></div>' +
+      '<div class="tbl-wrap"><table><thead><tr><th class="left">方法 / 判定条件</th><th>类型</th><th>样本 n</th><th>平均次日收益</th><th>胜率</th><th>晋级率</th><th>平均 MFE</th><th>平均 MAE</th><th>盈亏比</th><th>超额 vs 基准</th><th>最好/最差</th></tr></thead><tbody>' +
+      (mRows || '<tr><td colspan="11" class="empty">回测区间内无可用样本</td></tr>') + '</tbody></table></div>' +
+      '<div class="note-box" style="margin-top:10px"><b>怎么读：</b>「平均次日收益」= T 日收盘买入、T+1 收盘卖出的理论收益；MFE/MAE 是 T+1 最高/最低价相对 T 收盘的最大浮盈/浮亏；超额 = 该方法平均收益 − 全池基准。样本 n 不同的方法不能直接比高低；样本不足者只作观察项，不参与选优。全部方法都不计手续费、滑点、封板买不进与仓位。</div></div>';
+
+    const insuff = j.insufficientStrong || [];
+    const bestCard = '<div class="sec"><div class="sec-head"><h3>选优结论与待验证观察项</h3></div>' +
+      '<div class="grid2"><div class="info-card"><h4>' + (best ? E(best.name) + ' ' + verdictTag : '未产出最佳方法') + '</h4>' +
+      (best ? '<p>' + E(best.desc) + '</p><div class="kv"><span class="k">样本 / 平均收益</span><span class="v">' + E(best.n) + ' 笔 / ' + N(best.avgRet) + '%</span></div>' +
+        '<div class="kv"><span class="k">胜率 / 晋级率</span><span class="v">' + N(best.winRate, 1) + '% / ' + N(best.promoteRate, 1) + '%</span></div>' +
+        '<div class="kv"><span class="k">相对基准超额</span><span class="v">' + (best.edge === null ? '—' : (best.edge > 0 ? '+' : '') + N(best.edge) + ' pp') + '</span></div>' +
+        '<div class="kv"><span class="k">风险调整分</span><span class="v">' + N(best.riskAdj) + '</span></div>'
+        : '<p>' + E(j.bestReason || '') + '</p>') +
+      '<div class="note-box">' + E(j.bestReason || '') + '</div></div>' +
+      '<div class="info-card"><h4>数字更高但样本不足（待验证）</h4>' +
+      (insuff.length ? insuff.map(x => '<div class="kv"><span class="k">' + E(x.name) + '</span><span class="v">' + N(x.avgRet) + '% · n=' + E(x.n) + ' · 胜率 ' + N(x.winRate, 1) + '%</span></div>').join('') +
+        '<div class="note-box">这些方法在本区间数字更高，但样本 &lt;' + E(j.minSamples) + ' 笔，按纪律不参与选优；需要更长回溯窗口或更多样本才能判断，不能据此认定「更好」。</div>'
+        : '<p class="small muted">本区间没有「样本不足但收益显著高于基准」的方法。</p>') +
+      '</div></div></div>';
+
+    const cRows = cands.map((x, i) => '<tr>' +
+      '<td>' + (i + 1) + '</td>' +
+      '<td class="left"><span class="code">' + E(x.code) + '</span> <span class="nm">' + E(x.name) + '</span>' +
+      '<div class="small muted">' + E(x.boardLabel || (x.boards + ' 板')) + ' · ' + E(x.industry || '—') + '</div></td>' +
+      '<td>' + N(x.price) + '</td><td>' + PC(x.pct) + '</td>' +
+      '<td>' + E(x.theme ? x.theme.name + ' / ' + x.theme.stage : '—') + '</td>' +
+      '<td>' + N(x.sealFundRatio) + '%</td><td>' + E(x.firstSeal || '—') + '</td><td>' + E(x.brokenCount) + '</td>' +
+      '<td><b class="' + (x.score >= 60 ? 'up' : '') + '">' + E(x.score) + '</b></td>' +
+      '<td class="left small">' + (x.risks.length ? x.risks.map(r => tag(r, 'warn')).join(' ') : tag('无触发式风险', 'green')) + '</td></tr>').join('');
+    const candCard = '<div class="sec"><div class="sec-head"><h3>当前候选 · ' + E(j.candidateMethod ? j.candidateMethod.name : '未选定方法') + ' 映射（' + cands.length + ' 只）</h3>' +
+      src('东方财富最新涨停池 ' + (m.poolDate || '—') + '；实时价 腾讯证券 ' + (m.quoteTick || '—')) + '</div>' +
+      (cands.length ? '<div class="tbl-wrap"><table><thead><tr><th>#</th><th class="left">代码 / 名称</th><th>现价</th><th>涨跌幅</th><th class="left">题材 / 阶段</th><th>封单比</th><th>首封</th><th>炸板</th><th>排序分</th><th class="left">风险标签</th></tr></thead><tbody>' + cRows + '</tbody></table></div>'
+        : '<div class="card empty">最新交易日涨停池中没有符合胜出方法判定条件的标的；系统不降低门槛凑数。</div>') +
+      '<div class="note-box" style="margin-top:10px"><b>候选口径：</b>' + E(j.candidateMethod ? j.candidateMethod.desc : '—') +
+      '。排序分由封单强度、首封时间、炸板次数、题材强度、流通市值与累计板强度量化得出，<b>只用于排序，不是收益预测</b>。这里是「方法在当前池中的映射结果」，不是明日涨跌判断，也不含竞价与盘口数据。' +
+      (j.verdict === 'no-edge' ? '<br><b>重要：</b>胜出方法在本区间并未跑赢「不筛选」的全池基准，因此下方候选<b>不具备方法优势</b>，应视作普通涨停股的观察清单，而非优选推荐。'
+        : (j.verdict === 'insufficient' ? '<br><b>重要：</b>本区间样本不足，未选定最佳方法，下方不生成候选。' : '')) + '</div></div>';
+
+    const methodDoc = '<div class="sec"><div class="card pad"><div class="sec-head"><h3>回测口径与能力边界</h3></div>' +
+      (m.methodology && m.methodology.rules ? m.methodology.rules.map(r => '<div class="pb-step"><b>' + E(r.name) + '</b><span>' + E(r.text) + '</span></div>').join('') : '') +
+      '<div class="note-box">' + E((m.methodology && m.methodology.caveat) || '') + '</div>' +
+      '<div class="small muted" style="margin-top:8px">数据溯源：' + E(m.dataSourceNote || j.metaNote || '—') +
+      ' · 跳过样本：无日K ' + E((j.skipped || {}).noKline || 0) + ' / 无次日K ' + E((j.skipped || {}).noNextBar || 0) + ' / 无涨停池 ' + E((j.skipped || {}).noPool || 0) + '</div></div></div>';
+    const disc = '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>';
+
+    $('pane-enlighten').innerHTML = head + controls + marketCard + methodCard + bestCard + candCard + methodDoc + disc;
+    $('enDays').onchange = e => { S.enOpts.days = Number(e.target.value); loadEnlightenment(true); };
+    $('enReload').onclick = () => loadEnlightenment(true);
+
+    const items = methods.slice().sort((a, b) => (Number(a.avgRet) || 0) - (Number(b.avgRet) || 0))
+      .map(x => ({ name: x.name, value: Number(x.avgRet) || 0, label: N(x.avgRet) + '%', kind: x.kind }));
+    const opt = {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      grid: { left: 150, right: 48, top: 10, bottom: 24 },
+      xAxis: { type: 'value', ...AXIS, axisLabel: { color: '#6b7a8c', fontSize: 10, formatter: '{value}%' } },
+      yAxis: { type: 'category', data: items.map(x => x.name), ...AXIS },
+      series: [{
+        type: 'bar', barMaxWidth: 17,
+        data: items.map(x => ({ value: x.value, itemStyle: { color: x.kind === '基准' ? '#94a3b8' : (x.kind === '对照' ? '#d97706' : '#2f6fd0') } })),
+        label: { show: true, position: 'right', formatter: '{c}%', fontSize: 10, color: '#4b5b6b' }
+      }]
+    };
+    safeChart('enMethodChart', opt, items);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
