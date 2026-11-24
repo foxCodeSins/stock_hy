@@ -170,7 +170,7 @@
     pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
     pullFilters: '', pullError: null, pullMethodOpen: false, pullOfflineTimer: null, pullDays: 8,
     support: null, supportLoading: false, supportError: null, supportAt: 0, supportMethodOpen: false,
-    supportOpts: { scan: 600, window: 60, minDraw: 4, bandPct: 3, smallYang: 3, lookback: 6, shape: '全部', board: '全部' },
+    supportOpts: { scan: 600, window: 60, minDraw: 4, bandPct: 3, smallYang: 3, lookback: 6, shape: '全部', board: '全部', sort: 'pop' },
     srFilters: '', srPending: false, srLoadingNote: '',
     srSamples: { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' },
     bt: null, btLoading: false, btError: null, btOpen: false,
@@ -3293,13 +3293,25 @@
       '</tbody></table></div></div>';
     // 当日信号列表（按形态/板块筛选）
     let list = (r.list || []).filter(x => (o.shape === '全部' || x.shapeLabel === o.shape) && (o.board === '全部' || x.board === o.board));
+    // 股吧人气优先：排名越小越热，未上榜或接口不可用排末尾并回退到资金排序
+    const rankOf = x => Number(x.popRank) > 0 ? Number(x.popRank) : Infinity;
+    const popAvail = Number(m.popularityCount) > 0;
+    const byPop = o.sort === 'pop' && popAvail;
+    list = list.slice().sort((a, b) => byPop
+      ? (rankOf(a) - rankOf(b) || (b.main || 0) - (a.main || 0))
+      : ((b.main || 0) - (a.main || 0) || rankOf(a) - rankOf(b)));
+    const sortSel = '<label class="small muted">排序 </label><select class="sel" id="srSort">' +
+      '<option value="pop"' + (o.sort === 'pop' ? ' selected' : '') + '>股吧实时人气</option>' +
+      '<option value="main"' + (o.sort === 'main' ? ' selected' : '') + '>主力净流入</option></select>';
     const listCard = '<div class="card pad" style="margin-top:12px"><div class="sm-block-head"><h4>最新信号股（' + E(fmtDate(r.latestDate)) + ' · ' + list.length + ' 只）</h4>' +
-      '<span class="small muted">按主力净流入额排序 · 概率=历史同形态次日涨停率</span></div>' +
+      '<span class="small muted">' + sortSel + ' · 概率=历史同形态次日涨停率</span></div>' +
+      '<div class="small muted" style="margin:2px 0 8px">' + E(m.popularityNote || '') + (byPop ? '' : ' · 当前按主力净额排序') + '</div>' +
       (list.length ? '<div class="sr-list">' + list.map(x =>
         '<div class="pb-item" data-code="' + E(x.code) + '">' +
         '<div class="pb-item-top"><span class="stock-link" data-stock-code="' + E(x.code) + '"><b>' + E(x.name) + '</b> <span class="em-code">' + E(x.code) + '</span></span>' +
         '<span class="tag ' + (x.shape === 'doji' ? 'blue' : 'red') + '">' + E(x.shapeLabel) + '</span>' +
         '<span class="tag">' + E(x.board) + '</span>' +
+        (Number(x.popRank) > 0 ? '<span class="tag blue">股吧人气 #' + E(x.popRank) + '</span>' : '<span class="tag">股吧人气 —</span>') +
         '<span class="sr-spacer"></span><span class="sr-prob">次日涨停率 <b>' + E(x.prob === null ? '—' : x.prob + '%') + '</b></span></div>' +
         '<div class="pb-item-meta"><span>收盘 <b>' + N(x.close) + '</b></span><span>当日 ' + srPct(x.pct, '%') + '</span>' +
         '<span>距高点回撤 <b class="down">' + E(x.drawdown) + '%</b></span><span>支撑参考 ' + N(x.support) + '</span>' +
@@ -3325,6 +3337,7 @@
     $('srWindow').onchange = e => { S.supportOpts.window = Number(e.target.value); loadSupportReversal(true); };
     $('srDraw').onchange = e => { S.supportOpts.minDraw = Number(e.target.value); loadSupportReversal(true); };
     $('srShape').onchange = e => { S.supportOpts.shape = e.target.value; renderSupportReversal(); };
+    $('srSort').onchange = e => { S.supportOpts.sort = e.target.value; renderSupportReversal(); };
     $('srBoard').onchange = e => { S.supportOpts.board = e.target.value; loadSupportReversal(true); };
     $('srRefresh').onclick = () => loadSupportReversal(true);
     const mt = $('srMethodToggle'); if (mt) mt.onclick = () => { S.supportMethodOpen = !S.supportMethodOpen; renderSupportReversal(); };

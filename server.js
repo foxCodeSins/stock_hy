@@ -775,6 +775,15 @@ async function getSupportReversal(query, force) {
         fundCaliber: caliber,
         klineSource: '腾讯证券前复权日K（失败降级新浪不复权并逐只标注）'
       });
+      // 股吧实时人气：只查当日信号股，上游异常时置空由前端降级为资金排序
+      const popMap = await ds.getEastmoneyPopularity((result.list || []).map(x => x.code)).catch(() => ({}));
+      (result.list || []).forEach(x => {
+        const p = popMap[x.code];
+        x.popRank = p && Number(p.rank) > 0 ? Number(p.rank) : null;
+        x.popChange = p ? p.change : null;
+        x.popCalcTime = p ? p.calcTime : null;
+      });
+      const popCount = (result.list || []).filter(x => x.popRank !== null).length;
       // 全量历史信号只保留表格需要的字段，留在服务端缓存里按需分页；主响应仍只带前 120 条
       const allSamples = (result.samples || []).map(s => ({
         date: s.date, code: s.code, name: s.name, board: s.board || null,
@@ -794,6 +803,10 @@ async function getSupportReversal(query, force) {
         filters: { board: boardRaw, boards: globalBoards, srBoard, localBoard, capMin, capMax },
         universeCount: universeAll.length, eligibleCount: eligible.length, histAdded,
         sampleTotal: allSamples.length,
+        popularityCount: popCount,
+        popularityNote: popCount > 0
+          ? '股吧人气=东方财富股吧实时人气榜排名（数字越小越热；前100取榜单接口，其余按个股实时排名，未上榜排末尾）'
+          : '东方财富股吧人气暂不可用，信号股按主力净额排序',
         filterDesc: filterDesc.join(' · '),
         candidateNote: '候选=非ST A股按成交额降序前 ' + scan + ' 只 + 近10日涨停回踩池并集；成交额过滤 >2000万、股价>2元；当前生效筛选：' +
           filterDesc.join(' · ') + '（命中 ' + eligible.length + ' 只，历史池补入 ' + histAdded + ' 只）。' +
