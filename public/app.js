@@ -646,7 +646,9 @@
     const space = ov.spaceBoard.length ? ov.spaceBoard.map(x => boardBadge(x.code) + E(x.name) + '(' + E(x.code) + ') ' + x.boards + '板 · ' + E(x.industry)).join('；') : '无';
     // 天梯数据源：若用户选了历史日期，用 /api/ladder 返回的该日涨停池；否则用当日实时池
     const ladderIsHistory = !!(S.ladderDate && S.ladderData && S.ladderData.date === S.ladderDate);
-    const ztAll = ladderIsHistory ? (S.ladderData.zt || []) : ((d.opportunities && d.opportunities.zt) || []);
+    // 防御性去重：东财上游偶发返回同一只票的重复行，按 code 去重避免天梯里重复显示
+    const uniqByCode = arr => { const s = new Set(); return (arr || []).filter(x => { if (!x || s.has(x.code)) return false; s.add(x.code); return true; }); };
+    const ztAll = uniqByCode(ladderIsHistory ? (S.ladderData.zt || []) : ((d.opportunities && d.opportunities.zt) || []));
     const byBoard = new Map();
     ztAll.forEach(x => { const b = Number(x.boards) || 1; if (!byBoard.has(b)) byBoard.set(b, []); byBoard.get(b).push(x); });
     const boardOfCell = b => b >= 5 ? 'em-tier-5' : b === 4 ? 'em-tier-4' : b === 3 ? 'em-tier-3' : b === 2 ? 'em-tier-2' : 'em-tier-1';
@@ -717,7 +719,7 @@
     /* ── 跌停天梯：按东财跌停池 days 字段（连续跌停天数）分层，连跌越多层级越高；
           同时按东财行业归属统计跌停家数，标注跌停最集中的板块（题材映射无稳定来源，不臆造）。
           组内按封单额/流通市值降序，封单强度仍作排序与卡片展示依据 ── */
-    const dtAll = ladderIsHistory ? (S.ladderData.dt || []) : (d.limitDownPool || []);
+    const dtAll = uniqByCode(ladderIsHistory ? (S.ladderData.dt || []) : (d.limitDownPool || []));
     // 行业跌停家数统计，找出家数最多的板块（可能并列）
     const dtIndustry = new Map();
     dtAll.forEach(x => { const k = x.industry || '未分类'; dtIndustry.set(k, (dtIndustry.get(k) || 0) + 1); });
