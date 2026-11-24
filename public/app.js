@@ -180,7 +180,7 @@
     srFilters: '', srPending: false, srLoadingNote: '',
     srSamples: { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' },
     ddx: null, ddxLoading: false, ddxError: null, ddxAt: 0, ddxMethodOpen: false,
-    ddxOpts: { scan: 600, window: 60, ddxMin: 0.01, bodyMax: 5, turnMin: 5, board: '全部', sort: 'pop', popOnly: true },
+    ddxOpts: { scan: 900, window: 60, ddxMin: 1, bodyMax: 5, turnMin: 5, board: '全部', smooth: false, sort: 'pop', popOnly: true },
     ddxFilters: '', ddxPending: false,
     ddxSamples: { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' },
     bt: null, btLoading: false, btError: null, btOpen: false,
@@ -3453,7 +3453,8 @@
     const o = S.ddxOpts, f = collectFilters();
     const q = new URLSearchParams({
       scan: String(o.scan), window: String(o.window),
-      ddxMin: String(o.ddxMin), bodyMax: String(o.bodyMax), turnMin: String(o.turnMin)
+      ddxMin: String(o.ddxMin), bodyMax: String(o.bodyMax), turnMin: String(o.turnMin),
+      smooth: o.smooth ? '1' : '0'
     });
     ['board', 'capMin', 'capMax'].forEach(k => {
       if (f[k] !== '' && f[k] !== undefined && f[k] !== null) q.set(k, f[k]);
@@ -3465,7 +3466,7 @@
   function ddxSampleKey() { return ddxQueryParams().toString(); }
   function ddxSampleRow(s) {
     return '<tr><td>' + E(s.date) + '</td><td class="left"><span class="stock-link" data-stock-code="' + E(s.code) + '">' + E(s.name) + '</span> <span class="em-code">' + E(s.code) + '</span></td>' +
-      '<td>' + E(s.ddx) + '%</td><td>' + E(s.body) + '%</td><td>' + E(s.turnover) + '%</td><td class="up">' + E(s.pct) + '%</td>' +
+      '<td>' + E(s.ddx) + '‱</td><td>' + E(s.body) + '%</td><td>' + E(s.turnover) + '%</td><td class="up">' + E(s.pct) + '%</td>' +
       '<td>' + (s.pending ? '<span class="muted">待验证</span>' : (s.next && s.next.limitUp ? '<b class="up">涨停</b>' : '<span class="down">' + E(s.next && s.next.pct) + '%</span>')) + '</td>' +
       '<td class="' + (s.next && s.next.retOC > 0 ? 'up' : 'down') + '">' + (s.pending || !s.next ? '—' : E(s.next.retOC) + '%') + '</td>' +
       '<td class="' + (s.next && s.next.retCC > 0 ? 'up' : 'down') + '">' + (s.pending || !s.next ? '—' : E(s.next.retCC) + '%') + '</td></tr>';
@@ -3514,14 +3515,15 @@
     const kpi = (label, val, cls) => '<div class="pb-kpi"><span>' + label + '</span><b class="' + (cls || '') + '">' + (val === null || val === undefined ? '—' : val) + '</b></div>';
     const head = '<div class="card pad">' +
       '<div class="pb-controls">' +
-      '<label>扫描 <select class="sel" id="ddxScan"><option value="300">300 只</option><option value="600" selected>600 只</option><option value="900">900 只</option><option value="1200">1200 只</option></select></label>' +
+      '<label>扫描 <select class="sel" id="ddxScan"><option value="400">400 只</option><option value="900" selected>900 只</option><option value="1500">1500 只</option><option value="2000">全市场2000</option></select></label>' +
       '<label>回测 <select class="sel" id="ddxWindow"><option value="30">近 30 日</option><option value="60" selected>近 60 日</option><option value="90">近 90 日</option><option value="120">近 120 日</option></select></label>' +
-      '<label>DDX代理≥ <select class="sel" id="ddxDdxMin"><option value="0.01" selected>0.01%</option><option value="0.05">0.05%</option><option value="0.1">0.1%</option><option value="0.3">0.3%</option><option value="0.5">0.5%</option></select></label>' +
+      '<label>DDX≥ <select class="sel" id="ddxDdxMin"><option value="1" selected>1‱</option><option value="5">5‱</option><option value="10">10‱</option><option value="30">30‱</option><option value="50">50‱</option></select></label>' +
+      '<label>口径 <select class="sel" id="ddxSmooth"><option value="0" selected>当日柱值</option><option value="1">DDX1平滑</option></select></label>' +
       '<label>实体≤ <select class="sel" id="ddxBodyMax"><option value="3">3%</option><option value="5" selected>5%</option><option value="8">8%</option></select></label>' +
       '<label>换手≥ <select class="sel" id="ddxTurnMin"><option value="3">3%</option><option value="5" selected>5%</option><option value="8">8%</option><option value="10">10%</option></select></label>' +
       '<label>板块 <select class="sel" id="ddxBoard"><option value="全部">全部</option><option value="主板">主板</option><option value="创业板">创业板</option><option value="科创板">科创板</option></select></label>' +
       '<button class="btn btn-primary" id="ddxRefresh">重新回测</button>' +
-      '<span class="small muted">复刻东财 ddx1120：当日DDX≥阈值 + 前一日<0 + 实体&lt;上限 + 换手≥下限 + 未炸板；首次约 30~90 秒</span></div>' +
+      '<span class="small muted">复刻东财 ddx1120：全市场换手快筛 → 当日DDX≥阈值 + 前一日<0 + 实体&lt;上限 + 换手≥下限 + 未炸板；首次约 60~120 秒</span></div>' +
       '<div class="small" style="margin-top:8px"><b>已生效筛选</b>：' + E(ddxAppliedFilters(m)) + '</div>' +
       '<div class="small muted" style="margin-top:5px">' + E(m.candidateNote || '') + '</div></div>';
     // 回填 select 当前值
@@ -3551,7 +3553,7 @@
       '<div class="small muted" style="margin:2px 0 8px">' + E(m.popularityNote || '') + '</div>' +
       '<div class="sr-list">' + (list.length ? list.map(x => '<div class="pb-item" data-code="' + E(x.code) + '">' +
         '<div class="pb-item-top"><span class="stock-link" data-stock-code="' + E(x.code) + '"><b>' + E(x.name) + '</b> <span class="em-code">' + E(x.code) + '</span></span>' +
-        '<span class="tag blue">DDX ' + E(x.ddx) + '%</span><span class="tag">实体 ' + E(x.body) + '%</span><span class="tag">换手 ' + E(x.turnover) + '%</span>' +
+        '<span class="tag blue">DDX ' + E(x.ddx) + '‱</span><span class="tag">实体 ' + E(x.body) + '%</span><span class="tag">换手 ' + E(x.turnover) + '%</span>' +
         (x.popTop500 ? '<span class="tag blue">人气 #' + E(x.popRank) + '</span>' : (x.popRank ? '<span class="tag">人气 #' + E(x.popRank) + '</span>' : '')) +
         '<span class="sr-spacer"></span><span class="sr-prob">次日涨停率 <b>' + (x.prob === null ? '—' : E(x.prob) + '%') + '</b></span></div>' +
         '<div class="pb-item-meta"><span>收盘 ' + E(x.close) + '</span><span>当日 ' + E(x.pct) + '%</span><span>主力净额 ' + E(x.mainYi) + '亿</span><span>流通市值 ' + E(x.floatCap) + '亿</span><span>预期开→收 ' + E(x.expOC) + '%</span></div>' +
@@ -3559,7 +3561,7 @@
 
     const sampleCard = '<div class="card pad" style="margin-top:12px"><div class="sm-block-head"><h4>最近信号样本（含次日结果）</h4><span class="small muted" id="ddxSampleCount">载入中…</span></div>' +
       '<div class="small muted" style="margin:2px 0 8px">pending=最新信号日尚无次日数据；按信号日由近到远排列，向下滚动查看更早记录</div>' +
-      '<div class="tbl-wrap sr-samples-wrap" id="ddxSamplesScroll"><table><thead><tr><th>信号日</th><th class="left">个股</th><th>DDX代理</th><th>实体</th><th>换手</th><th>当日</th><th>次日涨停</th><th>开→收</th><th>收→收</th></tr></thead><tbody id="ddxSamplesBody"></tbody></table></div>' +
+      '<div class="tbl-wrap sr-samples-wrap" id="ddxSamplesScroll"><table><thead><tr><th>信号日</th><th class="left">个股</th><th>DDX(‱)</th><th>实体</th><th>换手</th><th>当日</th><th>次日涨停</th><th>开→收</th><th>收→收</th></tr></thead><tbody id="ddxSamplesBody"></tbody></table></div>' +
       '<div class="small muted sr-sample-hint" id="ddxSampleHint">向下滚动可继续查看更早的历史信号</div>' +
       '<button class="btn btn-ghost btn-sm" id="ddxSampleMore" style="display:none;margin-top:8px">加载更早的样本</button></div>';
 
@@ -3567,10 +3569,12 @@
       '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：' + E(m.disclaimer || '') + '</div>';
     // 回填控件值（render 会重建 DOM，必须每次设置）
     setSel('ddxScan', o.scan); setSel('ddxWindow', o.window); setSel('ddxDdxMin', o.ddxMin);
+    setSel('ddxSmooth', o.smooth ? '1' : '0');
     setSel('ddxBodyMax', o.bodyMax); setSel('ddxTurnMin', o.turnMin); setSel('ddxBoard', o.board);
     $('ddxScan').onchange = e => { S.ddxOpts.scan = Number(e.target.value); loadDdxFirstRed(true); };
     $('ddxWindow').onchange = e => { S.ddxOpts.window = Number(e.target.value); loadDdxFirstRed(true); };
     $('ddxDdxMin').onchange = e => { S.ddxOpts.ddxMin = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxSmooth').onchange = e => { S.ddxOpts.smooth = e.target.value === '1'; loadDdxFirstRed(true); };
     $('ddxBodyMax').onchange = e => { S.ddxOpts.bodyMax = Number(e.target.value); loadDdxFirstRed(true); };
     $('ddxTurnMin').onchange = e => { S.ddxOpts.turnMin = Number(e.target.value); loadDdxFirstRed(true); };
     $('ddxBoard').onchange = e => { S.ddxOpts.board = e.target.value; loadDdxFirstRed(true); };
@@ -4929,7 +4933,7 @@
           '竞价涨跌幅 ' + (q.open > 0 && q.prevClose > 0 ? (q.open > q.prevClose ? '+' : '') + N((q.open - q.prevClose) / q.prevClose * 100) + '%' : '—') +
           '；竞价期间的委托撤单过程不展示。' +
           '<br><b>看图口径：</b>价格线以昨收价（灰色虚线）为界，<b style="color:var(--up)">水上红色</b>、<b style="color:var(--down)">水下绿色</b>；横轴为固定交易时段，盘中曲线只画到当前时刻、右侧留白。' +
-          '<b>DDX / DDZ 为第三方专有算法指标，公开接口无法取得真实序列，系统不提供估算值</b>；此处用真实的特大单/大单资金快照替代。' +
+          '<b>DDX / DDZ 为第三方专有算法指标，公开接口无法取得真实序列，此处用真实的特大单/大单资金快照替代，非东财终端真值</b>；DDX首红精选模块另按公开公式给出可回测的近似值并已明确标注。' +
           '<b>分钟级数据，不是逐笔成交，不构成投资建议。</b></div>';
       }
       const bt = $('smBackToday');

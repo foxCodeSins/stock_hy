@@ -880,6 +880,7 @@ function ddxKey(query) {
   return JSON.stringify({
     scan: query.scan || '', window: query.window || '',
     ddxMin: query.ddxMin || '', bodyMax: query.bodyMax || '', turnMin: query.turnMin || '',
+    smooth: query.smooth || '',
     board: String(query.board || '全部').trim() || '全部',
     ddxBoard: String(query.ddxBoard || '全部').trim() || '全部',
     capMin: ddxNumOrNull(query.capMin), capMax: ddxNumOrNull(query.capMax)
@@ -919,15 +920,25 @@ async function getDdxFirstRed(query, force) {
   const job = (async () => {
     const t0 = Date.now();
     try {
-      const scan = Math.max(80, Math.min(1200, Number(query.scan) || 600));
+      const scan = Math.max(100, Math.min(2000, Number(query.scan) || 900));
       const universe = await ds.getUniverse().catch(() => ({ list: [] }));
       const universeAll = universe.list || [];
       const eligible = universeAll
         .filter(x => baseOk(x) && boardOk(x.board || ds.boardOf(x.code)) && capOk(x) && Number(x.floatCap) > 0)
         .sort((a, b) => (b.amount || 0) - (a.amount || 0));
-      const cand = eligible.slice(0, scan);
-      const kdata = await limitedMap(cand, 7, async x => ds.getKlineData(x.code, 130).catch(() => null));
-      const fdata = await limitedMap(cand, 7, async x => ds.getFundHistory(x.code, 100).catch(() => ({ rows: [], source: null })));
+      // 全市场覆盖：腾讯批量行情取当日换手率，先按 turnMin 的 60% 快筛，
+      // 避免只扫成交额前 N 只而漏掉武汉凡谷(#1098)/野马电池(#1011)这类中低成交额达标股。
+      // 换手率是信号的硬条件之一（当日≥turnMin），快筛放宽到 60% 留余量，再由回测精确判定。
+      const turnFloor = Math.max(1.5, (Number(query.turnMin) || 5) * 0.6);
+      let quotes = {};
+      try { quotes = await ds.getQQQuotes(eligible.map(x => x.code)); } catch (e) { /* 行情失败则回退成交额排序 */ }
+      const hasQuote = Object.keys(quotes).length > 0;
+      const fastFiltered = hasQuote
+        ? eligible.filter(x => (Number((quotes[x.code] || {}).turnover) || 0) >= turnFloor)
+        : eligible;
+      const cand = fastFiltered.slice(0, scan);
+      const kdata = await limitedMap(cand, 16, async x => ds.getKlineData(x.code, 130).catch(() => null));
+      const fdata = await limitedMap(cand, 16, async x => ds.getFundHistory(x.code, 100).catch(() => ({ rows: [], source: null })));
       const inputs = [];
       const fundSources = new Map();
       let noKline = 0, noFund = 0;
@@ -945,10 +956,11 @@ async function getDdxFirstRed(query, force) {
       const srcList = [...fundSources.entries()].sort((a, b) => b[1] - a[1]);
       const mainSrc = srcList.length ? srcList[0][0] : null;
       const caliber = mainSrc && /新浪/.test(mainSrc)
-        ? 'DDX代理=主力净额/流通市值（新浪口径=超大单，非东财超大单+大单；东财不可用时的降级源）'
-        : 'DDX代理=主力净额/流通市值（东财口径=超大单+大单）';
+        ? 'DDX近似=资金净额/流通市值×10000（新浪 netamount 含大单，方向接近东财；东财 push2his 本机不可达时的降级源）'
+        : 'DDX近似=(超大单f66+大单f72)/流通市值×10000（东方财富口径，对齐 DDX=大单净买入量×10000/流通股本）';
       const result = an.ddxFirstRedBacktest(inputs, {
         window: query.window, ddxMin: query.ddxMin, bodyMax: query.bodyMax, turnMin: query.turnMin,
+        smooth: query.smooth,
         fundSource: srcList.map(([s, n]) => s + ' ' + n + ' 只').join(' / ') || null,
         fundCaliber: caliber,
         klineSource: '腾讯证券前复权日K（失败降级新浪不复权并逐只标注）'
@@ -975,11 +987,12 @@ async function getDdxFirstRed(query, force) {
         fundSources: srcList.map(([source, n]) => ({ source, n })), fundCaliber: caliber,
         filters: { board: boardRaw, boards: globalBoards, ddxBoard, localBoard, capMin, capMax },
         universeCount: universeAll.length, eligibleCount: eligible.length,
+        fastFilter: { enabled: hasQuote, turnFloor: +turnFloor.toFixed(2), passed: fastFiltered.length, used: cand.length },
         sampleTotal: allSamples.length, popularityCount: popCount,
         popularityNote: '股吧人气=东方财富股吧实时人气榜（数字越小越热）。人气前500为东财分组条件之一，但无历史序列，仅对最新信号标注并可选过滤，不参与历史回测。' +
           (popCount > 0 ? '' : ' 当前人气接口不可用，页面按 DDX代理强度排序。'),
         filterDesc: filterDesc.join(' · '),
-        candidateNote: '候选=非ST A股按成交额降序前 ' + scan + ' 只；须有有效流通市值（DDX代理与换手率依赖）；成交额过滤>2000万、股价>2元。当前生效筛选：' + filterDesc.join(' · ') + '。',
+        candidateNote: '候选=全市场非ST活跃股（' + eligible.length + '只）按当日换手率≥' + turnFloor.toFixed(1) + '%快筛，取前 ' + scan + ' 只拉历史。覆盖全市场而非仅成交额头部，避免漏掉中低成交额达标股。须有效流通市值（DDX近似与换手率依赖）；成交额>2000万、股价>2元。当前筛选：' + filterDesc.join(' · ') + '。',
         asOf: result.asOf, disclaimer: DISCLAIMER
       };
       const value = { ok: true, meta, result, allSamples };
