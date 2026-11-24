@@ -642,7 +642,10 @@ tbody tr.dg-edge-row td:first-child{border-left:3px solid var(--edge)}
 tbody tr.dg-edge-row td:last-child{border-right:1px solid var(--edge)}
 tbody tr.dg-edge-row:hover td{background:var(--edge-bg)}
 /* 实时统计：所有「地位 × 一致分歧状态」组合的晋级率矩阵 */
-.dg-edge-meta{font-size:11px;color:var(--muted);margin:2px 0 9px;line-height:1.6}
+.dg-edge-meta{font-size:11px;color:var(--muted);margin:2px 0 9px;line-height:1.6;display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}
+.dg-edge-days{display:inline-flex;align-items:center;gap:5px;color:var(--ink2);font-weight:600;white-space:nowrap}
+.dg-edge-days select{padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);font-size:11px;cursor:pointer}
+.dg-edge-days select:focus{outline:2px solid rgba(47,111,208,.25);border-color:#2f6fd0}
 .dg-edge-matrix-wrap{overflow-x:auto;margin-bottom:8px}
 .dg-edge-matrix{width:100%;min-width:620px;border-collapse:collapse;table-layout:fixed;font-size:11px}
 .dg-edge-matrix th,.dg-edge-matrix td{border:1px solid var(--line2);padding:5px 6px;text-align:center;line-height:1.5}

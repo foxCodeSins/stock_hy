@@ -71,6 +71,16 @@
   function ladderMarksSave() {
     try { localStorage.setItem(LADDER_MARKS_KEY, JSON.stringify(S.ladderMarks)); } catch (e) { /* 隐私模式下忽略 */ }
   }
+  /* ── 历史优势组合统计窗口（交易日数）：默认 60 个交易日，用户可切 15/30/60/90 ── */
+  const EDGE_DAYS_KEY = 'stockhy_edge_days_v1';
+  const EDGE_DAYS_OPTIONS = [15, 30, 60, 90];
+  function edgeDaysLoad() {
+    const n = Number(localStorage.getItem(EDGE_DAYS_KEY));
+    return EDGE_DAYS_OPTIONS.indexOf(n) >= 0 ? n : 60;
+  }
+  function edgeDaysSave() {
+    try { localStorage.setItem(EDGE_DAYS_KEY, String(S.edgeDays)); } catch (e) { /* 隐私模式下忽略 */ }
+  }
   /* ── 自选股（localStorage，仅存代码+名称，行情一律实时拉取） ── */
   const WATCH_KEY = 'stockhy_watchlist_v1';
   function watchLoad() {
@@ -170,7 +180,7 @@
     dgHist: null, dgHistDate: null, dgHistOpen: false, dgHistLoading: false, dgHistError: null,
     dgHistSelected: null, dgHistMethodOpen: false,
     dgOpts: { days: 12, showAll: 0, sort: 'score', sortDir: 'desc', role: '全部', limit: 60 },
-    dgOfflineTimer: null, edgeStats: null,
+    dgOfflineTimer: null, edgeStats: null, edgeDays: edgeDaysLoad(), edgeDaysLoading: false,
     auction: null, auctionLoading: false, auctionError: null, auctionAt: 0,
     auctionOpts: { days: 10 }, auctionMethodOpen: false,
     ladderDate: null, ladderData: null, ladderDates: [], ladderLoading: false, ladderKind: 'zt',
@@ -238,6 +248,11 @@
       $(id).addEventListener('change', () => {
         if (S.tab === 'support' && S.srFilters !== srFilterSignature()) loadSupportReversal(false);
       });
+    });
+    // 历史优势组合统计窗口（两处卡片共用同一委托）
+    document.addEventListener('change', e => {
+      const sel = e.target && e.target.closest && e.target.closest('[data-edge-days]');
+      if (sel) changeEdgeDays(sel.value);
     });
     // 全局股票名点击委托：打开个股K线弹窗
     document.addEventListener('click', e => {
@@ -392,6 +407,7 @@
     const f = collectFilters();
     const q = new URLSearchParams();
     Object.keys(f).forEach(k => { if (f[k] !== '' && f[k] !== undefined) q.set(k, f[k]); });
+    q.set('edgeDays', String(S.edgeDays));
     if (force) q.set('force', '1');
     $('btnRefresh').disabled = true;
     try {
@@ -400,7 +416,7 @@
       if (j.error) throw new Error(j.error);
       S.prevPrices = pricesOf(S.data);
       S.data = j;
-      if (j.edgeStats) S.edgeStats = j.edgeStats;
+      if (j.edgeStats && (!j.edgeStats.window || Number(j.edgeStats.window.requestedDays) === S.edgeDays)) S.edgeStats = j.edgeStats;
       S.lastFilters = describeFilters(f);
       render();
       // 新模块走独立 API：仅在该 tab 可见、筛选变化或超过 60 秒时才重新扫描，避免拖累 15 秒主看板刷新
@@ -2104,13 +2120,40 @@
     return '<span class="dg-edge-inline edge-' + E(edge.key) + '" style="' + dgEdgeStyle(edge) +
       '" title="' + E(dgEdgeTitle(edge)) + '">★ ' + E(edge.label) + ' <span data-edge-rate>' + E(edge.rate) + '</span></span>';
   }
+  function edgeDaysControl() {
+    return '<label class="dg-edge-days">统计窗口 <select data-edge-days>' +
+      EDGE_DAYS_OPTIONS.map(n => '<option value="' + n + '"' + (S.edgeDays === n ? ' selected' : '') + '>' + n + ' 个交易日</option>').join('') +
+      '</select></label>';
+  }
+  /** 切换统计窗口：持久化选择、按新窗口请求统计，并就地刷新两处卡片 */
+  async function changeEdgeDays(n) {
+    const days = Number(n);
+    if (EDGE_DAYS_OPTIONS.indexOf(days) < 0 || days === S.edgeDays || S.edgeDaysLoading) return;
+    S.edgeDays = days; edgeDaysSave(); S.edgeDaysLoading = true;
+    refreshEdgeLegend();
+    try {
+      const j = await fetch('/api/dragon/edge-stats?days=' + days, { cache: 'no-store' }).then(r => r.json());
+      if (j && j.available && Number((j.window || {}).requestedDays) === days) S.edgeStats = j;
+    } catch (e) { /* 统计失败不覆盖已有数据 */ }
+    S.edgeDaysLoading = false;
+    refreshEdgeLegend();
+    // 角标 / 徽标也要跟着新概率更新
+    try { if (S.dg) renderDragon(); } catch (e) { }
+  }
+  function refreshEdgeLegend() {
+    document.querySelectorAll('.dg-edge-legend-root').forEach(root => {
+      root.innerHTML = edgeLegendInner(root.getAttribute('data-compact') === '1');
+    });
+  }
   /** 实时统计卡片：列出所有「地位 × 一致分歧状态」组合的晋级率（无数据时如实提示，不回退固定常量） */
   function edgeLegendInner(compact) {
     const st = S.edgeStats;
     const head = '<div class="dg-card-head"><h4>历史优势组合 · 彩色边框标记</h4>' +
-      '<span class="small muted">概率由服务端按当前可回溯窗口实时统计</span></div>';
+      '<span class="small muted">概率由服务端按选定窗口实时统计</span></div>';
     if (!st || !st.available || !st.combos) {
-      const pending = '<div class="small muted">正在统计各组合晋级率…（数据随主看板刷新下发）</div>';
+      const pending = '<div class="small muted">' +
+        (S.edgeDaysLoading ? '正在按 ' + S.edgeDays + ' 个交易日窗口统计…（首次需回溯历史涨停池，可能要十几秒）' : '正在统计各组合晋级率…（数据随主看板刷新下发）') +
+        '</div>' + edgeDaysControl();
       return compact
         ? '<div class="dg-h5" style="margin-top:11px">历史优势组合 · 彩色边框标记</div>' + pending
         : '<div class="card pad dg-card dg-edge-legend">' + head + pending + '</div>';
@@ -2122,10 +2165,11 @@
     const dtypes = (st.byDtype || []).map(r => String(r.key));
     const roleOrder = EDGE_ROLES.filter(r => roles.indexOf(r) >= 0).concat(roles.filter(r => EDGE_ROLES.indexOf(r) < 0));
     const dtypeOrder = EDGE_DTYPES.filter(d => dtypes.indexOf(d) >= 0).concat(dtypes.filter(d => EDGE_DTYPES.indexOf(d) < 0));
-    let html = '<div class="dg-edge-meta">实时统计 · 窗口 ' + E(fmtDate(w.from)) + ' ~ ' + E(fmtDate(w.to)) +
+    let html = '<div class="dg-edge-meta">' + edgeDaysControl() +
+      '<span>实时统计 · 窗口 ' + E(fmtDate(w.from)) + ' ~ ' + E(fmtDate(w.to)) +
       ' · ' + (w.countedDays || 0) + ' 个有效交易日 · 共 ' + ((st.total || {}).n || 0) + ' 个候选样本 · 全样本晋级率 ' +
       E((st.total && st.total.rate !== null && st.total.rate !== undefined) ? st.total.rate + '%' : '—') +
-      ' · 每 10 分钟重算</div>';
+      ' · 每 10 分钟重算</span></div>';
     html += '<div class="dg-edge-matrix-wrap"><table class="dg-edge-matrix"><thead><tr><th>地位 ＼ 状态</th>' +
       dtypeOrder.map(t => '<th>' + E(t) + '</th>').join('') + '</tr></thead><tbody>';
     roleOrder.forEach(role => {
@@ -2147,7 +2191,8 @@
     html += '</tbody></table></div>';
     const line = arr => (arr || []).map(r => E(r.key) + ' ' + E(r.rate === null ? '—' : r.rate + '%') + ' (n=' + r.n + ')').join(' · ');
     html += '<div class="dg-edge-sums"><div><b>按地位：</b>' + line(st.byRole) + '</div><div><b>按状态：</b>' + line(st.byDtype) + '</div></div>';
-    html += '<div class="note-box">' + E(st.method || '') + '<br>' + E(st.note || '') +
+    html += '<div class="note-box">' + (w.source ? '<b>数据来源：</b>' + E(w.source) + '<br>' : '') +
+      E(st.method || '') + '<br>' + E(st.note || '') +
       '<br>彩色边框仅标记「一致加速 + 空间板 / 累计板龙 / 题材龙」三类组合；角标与本表数值均取自本次实时统计。' +
       '样本数 &lt; ' + minN + ' 的组合已淡化显示，不作判断依据。</div>';
     return compact
@@ -2155,7 +2200,7 @@
       : '<div class="card pad dg-card dg-edge-legend">' + head + html + '</div>';
   }
   function dgEdgeLegendCard(compact) {
-    return '<div class="dg-edge-legend-root">' + edgeLegendInner(!!compact) + '</div>';
+    return '<div class="dg-edge-legend-root" data-compact="' + (compact ? '1' : '0') + '">' + edgeLegendInner(!!compact) + '</div>';
   }
   /** 首板龙头种子：最近回测分档概率图例，挂在连板天梯下方 */
   function seedLegendCard(s, isHistory) {
@@ -2773,11 +2818,12 @@
     ['board', 'capMin', 'capMax', 'excludeST', 'keyword'].forEach(k => {
       if (f[k] !== '' && f[k] !== undefined && f[k] !== null) q.set(k, f[k]);
     });
+    q.set('edgeDays', String(S.edgeDays));
     if (force) q.set('force', '1');
     try {
       const j = await fetchDragonJson(q);
       S.dg = j; S.dgAt = Date.now(); S.dgError = null; S.dgFilters = S.lastFilters;
-      if (j.edgeStats) S.edgeStats = j.edgeStats;
+      if (j.edgeStats && (!j.edgeStats.window || Number(j.edgeStats.window.requestedDays) === S.edgeDays)) S.edgeStats = j.edgeStats;
       const list = j.list || [];
       if (!list.some(x => x.code === S.dgSelected)) S.dgSelected = list.length ? list[0].code : null;
       renderDragon();

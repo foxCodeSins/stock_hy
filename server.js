@@ -255,8 +255,8 @@ async function buildDashboard(query) {
     disclaimer: DISCLAIMER
   };
 
-  // 概率随主看板一起下发（内部有 10 分钟缓存，命中时只是内存计算，不额外拉行情）
-  const edgeStats = await getEdgeStats();
+  // 概率随主看板一起下发（按所选窗口缓存；冷启动不阻塞，后台算完后下次刷新带上）
+  const edgeStats = getEdgeStatsSnapshot(f.edgeDays);
   return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, limitDownPool: pools.dt || [], boards, fundFlow, globalMarkets, relay, ai, prevLadder, firstBoardSeed: seed, edgeStats };
 }
 
@@ -855,21 +855,39 @@ async function getBacktest(query, force) {
 }
 
 /* ─────────── 明日龙头 · 只做龙头 / 买在分歧卖在一致 ─────────── */
-// 「历史优势组合」概率：按当前可回溯窗口逐日回放统计，10 分钟重算一次（与历史池缓存同频）。
+// 「历史优势组合」概率：按可回溯窗口逐日回放统计，每个窗口 10 分钟重算一次。
+// 东财涨停池实测只保留约 15 个交易日，更早日期由 ds.getLongPoolHistory 用同花顺回补。
 // 结果随主看板 /api/dashboard 与 /api/dragon 一起下发，前端不再写死概率常量。
-const edgeStatsCache = { at: 0, value: null, inflight: null };
-async function getEdgeStats(force) {
-  if (!force && edgeStatsCache.value && Date.now() - edgeStatsCache.at < 600000) return edgeStatsCache.value;
-  if (edgeStatsCache.inflight) return edgeStatsCache.inflight;
-  edgeStatsCache.inflight = (async () => {
+const EDGE_DAYS_OPTIONS = [15, 30, 60, 90];
+const EDGE_DAYS_DEFAULT = 60;
+const edgeStatsCache = { values: new Map(), inflight: new Map() };
+function edgeDaysOf(days) {
+  const n = Math.floor(Number(days));
+  return Number.isFinite(n) && n > 0 ? Math.min(90, Math.max(5, n)) : EDGE_DAYS_DEFAULT;
+}
+async function getEdgeStats(days, force) {
+  const d = edgeDaysOf(days);
+  const hit = edgeStatsCache.values.get(d);
+  if (!force && hit && Date.now() - hit.at < 600000) return hit.value;
+  if (edgeStatsCache.inflight.has(d)) return edgeStatsCache.inflight.get(d);
+  const job = (async () => {
     try {
-      const history = await ds.getPoolFullHistory(15).catch(() => ({ dates: [], byDate: {} }));
-      const value = an.dragonEdgeStats(history);
-      edgeStatsCache.value = value; edgeStatsCache.at = Date.now();
+      const history = await ds.getLongPoolHistory(d).catch(() => ({ dates: [], byDate: {} }));
+      const value = an.dragonEdgeStats(history, { days: d, maxCandidates: 200 });
+      edgeStatsCache.values.set(d, { at: Date.now(), value });
       return value;
-    } finally { edgeStatsCache.inflight = null; }
+    } finally { edgeStatsCache.inflight.delete(d); }
   })();
-  return edgeStatsCache.inflight;
+  edgeStatsCache.inflight.set(d, job);
+  return job;
+}
+/** 主看板下发用：冷启动时先返回 null 不阻塞首屏，统计在后台跑，下次刷新自然带上 */
+function getEdgeStatsSnapshot(days) {
+  const d = edgeDaysOf(days);
+  const hit = edgeStatsCache.values.get(d);
+  if (hit && Date.now() - hit.at < 600000) return hit.value;
+  if (!edgeStatsCache.inflight.has(d)) getEdgeStats(d, false).catch(() => { });
+  return null;
 }
 
 const dragonCache = { at: 0, key: '', value: null, inflight: null };
@@ -989,12 +1007,13 @@ async function buildDragon(query) {
     dataSourceNote: g.metaNote + '；实时溢价快照时点 ' + (quoteTick || '—') + '；指数：腾讯证券；题材理解补充：新浪财经概念 / 行业板块成分映射（' + topBoards.length + ' 个板块）与涨停股名称字面聚类；严重异动预测 = 日K累计涨幅（' + risk.summary.klineOk + '/' + risk.summary.klineTotal + ' 只可用）+ 个股公告风险词（' + annItems.length + ' 条）。',
     disclaimer: DISCLAIMER
   };
-  const edgeStats = await getEdgeStats();
+  const edgeStats = getEdgeStatsSnapshot(query.edgeDays);
   return { meta, ...g, edgeStats };
 }
 
 async function getDragon(query, force) {
   const key = JSON.stringify({
+    edgeDays: query.edgeDays || '',
     days: query.days || '', board: query.board || '', capMin: query.capMin || '',
     capMax: query.capMax || '', keyword: query.keyword || '', excludeST: query.excludeST || '',
     sort: query.sort || '', sortDir: query.sortDir || '', limit: query.limit || '',
@@ -1713,7 +1732,10 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/support-reversal/samples') return sendJson(res, await getSupportReversalSamples(q));
     if (u.pathname === '/api/backtest') return sendJson(res, await getBacktest(q, q.force === '1'));
     if (u.pathname === '/api/dragon') return sendJson(res, await getDragon(q, q.force === '1'));
-    if (u.pathname === '/api/dragon/edge-stats') return sendJson(res, await getEdgeStats(q.force === '1'));
+    if (u.pathname === '/api/dragon/edge-stats') {
+      const v = await getEdgeStats(q.days || q.edgeDays, q.force === '1');
+      return sendJson(res, { ...v, daysOptions: EDGE_DAYS_OPTIONS, days: edgeDaysOf(q.days || q.edgeDays) });
+    }
     if (u.pathname === '/api/dragon/review') return sendJson(res, await getDragonReview(q, q.force === '1'));
     if (u.pathname === '/api/news') return sendJson(res, await getNews(q, q.force === '1'));
     if (u.pathname === '/api/enlightenment') return sendJson(res, await getEnlightenment(q, q.force === '1'));
@@ -1726,31 +1748,29 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/search') {
       const kw = String(q.q || '').trim();
       if (!kw) return sendJson(res, { list: [], total: 0 });
-      const uni = await ds.getUniverse().catch(() => ({ list: [] }));
+      const uni = await ds.getUniverseStale().catch(() => ({ list: [] }));
       const k = kw.toLowerCase();
       const numeric = /^\d+$/.test(k);
       const pyMode = /^[a-z]+$/.test(k); // 纯字母：按拼音首字母匹配（含 ST 前缀）
-      // 打分：精确 > 前缀 > 包含；拼音与代码/名称同分档时按涨幅排序
-      const score = x => {
+      // 打分：精确 > 前缀 > 包含；每只股票只算一次分，排序直接复用，避免比较器里重复算首字母
+      const rows = [];
+      for (const x of (uni.list || [])) {
         const code = String(x.code || ''), name = String(x.name || '').toLowerCase();
-        if (code === k) return 8;
-        if (name === k) return 7;
-        if (numeric) return code.includes(k) ? (code.startsWith(k) ? 6 : 3) : 0;
-        if (pyMode) {
+        let s = 0;
+        if (code === k) s = 8;
+        else if (name === k) s = 7;
+        else if (numeric) s = code.includes(k) ? (code.startsWith(k) ? 6 : 3) : 0;
+        else if (pyMode) {
           const ini = py.initialsOf(name);
-          if (!ini) return 0;
-          if (ini === k) return 7;
-          if (ini.startsWith(k)) return 6;
-          return ini.includes(k) ? 4 : 0;
-        }
-        if (name.includes(k)) return code.startsWith(k) ? 6 : 4;
-        return code.includes(k) ? 3 : 0;
-      };
-      const list = (uni.list || []).filter(x => score(x) > 0)
-        .sort((a, b) => score(b) - score(a) || (Number(b.pct) || 0) - (Number(a.pct) || 0))
-        .slice(0, 12).map(x => ({
-        code: x.code, name: x.name, price: x.price, pct: x.pct,
-        board: x.board, industry: x.industry || null, floatCap: x.floatCap
+          s = ini === k ? 7 : (ini.startsWith(k) ? 6 : (ini.includes(k) ? 4 : 0));
+        } else if (name.includes(k)) s = code.startsWith(k) ? 6 : 4;
+        else s = code.includes(k) ? 3 : 0;
+        if (s > 0) rows.push({ x, s, pct: Number(x.pct) || 0 });
+      }
+      rows.sort((a, b) => b.s - a.s || b.pct - a.pct);
+      const list = rows.slice(0, 12).map(r => ({
+        code: r.x.code, name: r.x.name, price: r.x.price, pct: r.x.pct,
+        board: r.x.board, industry: r.x.industry || null, floatCap: r.x.floatCap
       }));
       return sendJson(res, { list, total: list.length, asOf: uni.asOf || null, source: ds.SOURCE_META.sina.label });
     }
@@ -1872,3 +1892,5 @@ function startListen(port, retries) {
   server.listen(port, '127.0.0.1');
 }
 startListen(PREFERRED_PORT, 15);
+// 启动时后台预热默认窗口统计，避免用户首次打开明日龙头时等长历史拉取
+setTimeout(() => { getEdgeStats(EDGE_DAYS_DEFAULT, false).catch(() => { }); }, 800);
