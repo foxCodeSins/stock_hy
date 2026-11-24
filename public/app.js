@@ -4006,16 +4006,26 @@
   function renderWatchlist() {
     const pane = $('pane-watchlist'); if (!pane) return;
     detachDockedDialog();
+    // 行情轮询会重建列表：先记住添加框状态，重建后还原，避免拼音尚未输完就被清空
+    const prevInput = $('wlAddInput');
+    const addOpen = !!(prevInput && prevInput.parentElement && prevInput.parentElement.classList.contains('open'));
+    const addVal = prevInput ? prevInput.value : '';
+    const addFocused = !!prevInput && document.activeElement === prevInput;
+    const addPos = prevInput ? prevInput.selectionStart : null;
+    const prevSug = $('wlAddPanel');
+    const sugHtml = prevSug ? prevSug.innerHTML : '';
+    const sugShown = prevSug ? prevSug.style.display : '';
     const list = S.watch.list;
     const q = S.watch.quotes || {};
     if (!list.length) {
       pane.innerHTML = '<div class="wl-layout"><div class="wl-panel">' +
         '<div class="wl-panel-head"><h3>自选股 <span class="muted small" id="wlCount">0</span></h3>' +
         '<div class="wl-panel-tools"><button class="wl-btn" id="wlAddBtn">＋ 添加</button></div></div>' +
-        '<div class="wl-add-row" id="wlAddRow"><input id="wlAddInput" placeholder="代码 / 名称 / 拼音，如 dfhy" autocomplete="off"><button class="wl-btn primary" id="wlAddOk">添加</button></div>' +
+        '<div class="wl-add-wrap"><div class="wl-add-row" id="wlAddRow"><input id="wlAddInput" placeholder="代码 / 名称 / 拼音，如 dfhy" autocomplete="off"><button class="wl-btn primary" id="wlAddOk">添加</button></div>' +
+        '<div class="wl-sug-panel" id="wlAddPanel" style="display:none"></div></div>' +
         '<div class="wl-empty">还没有自选股。<br>点「＋ 添加」输入代码、名称或拼音首字母；<br>也可在搜索结果 / 个股详情点 ☆ 加入。</div></div>' +
         '<div class="wl-detail" id="wlDetail"><div class="wl-empty">从左侧选择一只自选股，右侧显示分时 / 日K / 筹码峰 / 详情</div></div></div>';
-      bindWatchEvents(); return;
+      bindWatchEvents(); restoreAddState(addOpen, addVal, addFocused, addPos, sugHtml, sugShown); return;
     }
     const items = list.map(x => {
       const qq = q[x.code] || {};
@@ -4036,11 +4046,27 @@
     pane.innerHTML = '<div class="wl-layout"><div class="wl-panel">' +
       '<div class="wl-panel-head"><h3>自选股 <span class="muted small" id="wlCount">' + list.length + '</span></h3>' +
       '<div class="wl-panel-tools"><button class="wl-btn primary" id="wlAddBtn">＋ 添加</button></div></div>' +
-      '<div class="wl-add-row" id="wlAddRow"><input id="wlAddInput" placeholder="代码 / 名称 / 拼音，如 dfhy" autocomplete="off"><button class="wl-btn primary" id="wlAddOk">添加</button></div>' +
+      '<div class="wl-add-wrap"><div class="wl-add-row" id="wlAddRow"><input id="wlAddInput" placeholder="代码 / 名称 / 拼音，如 dfhy" autocomplete="off"><button class="wl-btn primary" id="wlAddOk">添加</button></div>' +
+      '<div class="wl-sug-panel" id="wlAddPanel" style="display:none"></div></div>' +
       '<div class="wl-list" id="wlList">' + items + '</div>' +
       '<div class="small muted" style="margin-top:7px;line-height:1.6">行情为腾讯实时快照，随主看板刷新；列表存本地浏览器，不上传。</div></div>' +
       '<div class="wl-detail" id="wlDetail"><div class="wl-empty">从左侧选择一只自选股，右侧显示分时 / 日K / 筹码峰 / 详情</div></div></div>';
     bindWatchEvents();
+    restoreAddState(addOpen, addVal, addFocused, addPos, sugHtml, sugShown);
+  }
+
+  /** 还原添加框输入内容、焦点与实时候选，避免行情轮询重建 DOM 时打断输入 */
+  function restoreAddState(open, val, focused, pos, sugHtml, sugShown) {
+    if (!open) return;
+    const row = $('wlAddRow'); if (row) row.classList.add('open');
+    const inp = $('wlAddInput'); if (!inp) return;
+    inp.value = val;
+    const panel = $('wlAddPanel');
+    if (panel && sugHtml) { panel.innerHTML = sugHtml; panel.style.display = sugShown || 'block'; }
+    if (focused) {
+      inp.focus();
+      try { inp.setSelectionRange(pos == null ? val.length : pos, pos == null ? val.length : pos); } catch (_) { }
+    }
   }
 
   /** 批量拉自选股实时行情（复用顶部搜索同款 /api/quotes） */
@@ -4067,8 +4093,23 @@
     const pane = $('pane-watchlist'); if (!pane) return;
     reattachDockedDialog();
     if (pane.dataset.bound === '1') return;
+    let sugTimer = null, sugHits = [];
+    const hideSug = () => {
+      const p = $('wlAddPanel'); if (p) { p.style.display = 'none'; p.innerHTML = ''; }
+      sugHits = [];
+    };
     // 事件委托绑在 pane 上，renderWatchlist 重建 innerHTML 后仍有效
     pane.addEventListener('click', e => {
+      const sug = e.target.closest('[data-wl-sug]');
+      if (sug) {
+        e.stopPropagation();
+        const hit = sugHits[Number(sug.dataset.wlSug)];
+        if (hit) {
+          watchAdd(hit.code, hit.name);
+          const inp = $('wlAddInput'); if (inp) { inp.value = ''; inp.focus(); }
+        }
+        hideSug(); return;
+      }
       const del = e.target.closest('[data-wl-del]');
       if (del) { e.stopPropagation(); watchRemove(del.dataset.wlDel); return; }
       if (e.target.closest('#wlAddBtn')) {
@@ -4086,7 +4127,33 @@
         openStockChart(code, true); // docked：详情停靠到右栏
       }
     });
-    pane.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'wlAddInput') { e.preventDefault(); doWatchAdd(); } });
+    // 与顶部搜索共用 /api/search：代码 / 名称 / 拼音首字母实时候选
+    pane.addEventListener('input', e => {
+      if (e.target.id !== 'wlAddInput') return;
+      clearTimeout(sugTimer);
+      const kw = e.target.value.trim();
+      if (!kw) { hideSug(); return; }
+      sugTimer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/search?q=' + encodeURIComponent(kw), { cache: 'no-store' });
+          const j = await r.json();
+          const inp = $('wlAddInput');
+          if (!inp || inp.value.trim() !== kw) return; // 输入已变化，丢弃过期结果
+          sugHits = (j.list || []).slice(0, 8);
+          const p = $('wlAddPanel'); if (!p) return;
+          p.innerHTML = sugHits.length
+            ? sugHits.map((x, i) => '<div class="wl-sug" data-wl-sug="' + i + '"><b>' + E(x.name) + '</b><span class="code">' + E(x.code) + '</span><span class="px">' + N(x.price) + '</span></div>').join('')
+            : '<div class="wl-sug-empty">未找到匹配股票（支持代码 / 名称 / 拼音首字母）</div>';
+          p.style.display = 'block';
+        } catch (_) { hideSug(); }
+      }, 200);
+    });
+    pane.addEventListener('keydown', e => {
+      if (e.target.id !== 'wlAddInput') return;
+      if (e.key === 'Escape') { hideSug(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); doWatchAdd(); }
+    });
+    document.addEventListener('click', e => { if (!e.target.closest('.wl-add-wrap')) hideSug(); });
     pane.dataset.bound = '1';
   }
 
