@@ -251,7 +251,7 @@ async function buildDashboard(query) {
     port: ACTIVE_PORT,
     aiConfigured: aiStatus().configured,
     aiModel: aiStatus().model,
-    dataSourceNote: '全市场广度=新浪财经行情中心；实时快照/指数=腾讯证券行情；全球行情(港股/美股/国际商品)=腾讯证券行情；日K(前复权)=腾讯证券；涨停/炸板/强势/跌停池与连板数、封单、行业=东方财富涨停池。均为免费公开接口，非交易所官方推送，盘中可能有秒级延迟。',
+    dataSourceNote: '全市场广度=新浪财经行情中心；实时快照/指数=腾讯证券行情；全球行情(港股/美股/国际商品)=腾讯证券行情，(日经225/韩国综合)=新浪财经全球指数；日K(前复权)=腾讯证券；涨停/炸板/强势/跌停池与连板数、封单、行业=东方财富涨停池。均为免费公开接口，非交易所官方推送，盘中可能有秒级延迟。',
     disclaimer: DISCLAIMER
   };
 

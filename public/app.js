@@ -563,7 +563,7 @@
     const g = d.globalMarkets || {};
     const rows = g.rows || [];
     if (!rows.length) { el.style.display = 'none'; return; }
-    const groups = [['港股', '🇭🇰 港股'], ['美股', '🇺🇸 美股'], ['商品', '🛢 国际商品']];
+    const groups = [['港股', '🇭🇰 港股'], ['日韩', '🇯🇵🇰🇷 日韩'], ['美股', '🇺🇸 美股'], ['商品', '🛢 国际商品']];
     const cell = x => {
       const c = x.pct > 0 ? 'up' : x.pct < 0 ? 'down' : 'flat';
       const sign = x.pct > 0 ? '+' : '';
