@@ -788,6 +788,24 @@
       '</div>'
     ).join('');
 
+    /* 概念主线：按新浪概念板块成分股重新分组，与上方行业分组并列对比（同一套生命周期规则） */
+    const cts = d.conceptThemes || [];
+    const conceptThemesHtml = cts.length
+      ? cts.map(t =>
+          '<div class="info-card theme-card theme-card-concept"><h4>' + E(t.name) + ' <span class="mini-tag concept-tag">概念</span><span class="mini-tag">' + t.count + ' 只涨停</span></h4>' +
+          '<div class="theme-meta">' + tag('最高 ' + t.maxBoard + ' 板', 'red') + tag(t.stage, 'purple') + tag('预期：' + t.outlook, t.outlookScore >= 3 ? 'red' : 'warn') + (t.gap ? tag('梯队断层', 'warn') : '') + '</div>' +
+          dragonRow(t) +
+          '<p><b>阶段依据：</b>' + E(t.stageBasis) + '</p>' +
+          '<p style="margin-top:5px"><b>持续性：</b>' + E(t.outlookBasis) + '</p>' +
+          '<p style="margin-top:5px"><b>概念成分：</b>' + E((t.memberNames || []).join('、')) + '（跨行业，按新浪概念板块成分归组）</p>' +
+          (t.boardRef ? '<p style="margin-top:5px"><b>板块参照：</b>' + E(t.boardRef.name) + ' ' + (t.boardRef.pct > 0 ? '+' : '') + N(t.boardRef.pct) + '%（新浪财经板块行情）</p>' : '') +
+          '</div>'
+        ).join('')
+      : '<div class="empty">当日涨幅居前的概念板块中，未出现 ≥2 只成分股同时涨停（概念主线证据不足）</div>';
+    const conceptSectionHtml =
+      '<div class="concept-theme-head"><h4>概念主线 <span class="small muted" style="font-weight:400">· 按新浪概念板块成分归组，跨行业，与上方行业口径并列对比</span></h4></div>' +
+      '<div class="review-theme-list review-theme-concept">' + conceptThemesHtml + '</div>';
+
     const focus = (rv.focus || []).map((f, i) => '<div class="info-card"><h4>' + tag('焦点 ' + (i + 1), 'blue') + ' ' + E(f.title) + '</h4><p>' + E(f.text) + '</p></div>').join('');
 
     const planRows = (rv.playbook || []).map(p =>
@@ -872,9 +890,10 @@
       '<div class="sec"><div class="sec-head"><h3>一、盘面结构与状态诊断</h3>' + src('新浪财经全市场快照 / 腾讯证券指数 / 东方财富涨停池，时点 ' + TICK(m)) + '</div>' +
       '<div class="grid2"><div class="review-left">' +
       '<div class="card pad"><div class="fact-list">' + facts + '</div></div>' +
-      '<div class="sub-sec-head" style="margin-top:2px;padding-top:0;border-top:none"><h4>主线题材与生命周期</h4>' + src('东方财富涨停池行业归属 + 新浪财经板块行情，交易日 ' + (m.poolDate || '—')) + '</div>' +
+      '<div class="sub-sec-head" style="margin-top:2px;padding-top:0;border-top:none"><h4>主线题材与生命周期</h4>' + src('行业口径＝东财涨停池行业归属；概念口径＝新浪概念板块成分，交易日 ' + (m.poolDate || '—')) + '</div>' +
       '<div class="review-theme-list">' + (themes || '<div class="empty">当前无涨停题材分组数据</div>') + '</div>' +
-      '<div class="note-box"><b>龙一 / 龙二 / 龙三</b>＝题材内按连板高度→封单比→首封时间→累计涨停数机械排名（与连板天梯「板块龙头」同口径，悬停看封单比/首封时间），仅表当日地位、不代表次日表现。<br>题材阶段完全由量价结构（涨停扩散数 / 连板高度 / 梯队完整度 / 炸板负反馈率 / 板块涨跌幅）机械推导，本页评分不纳入新闻与公告数据（消息面见「明日龙头」模块独立监控）；阶段判断为前瞻性推演，需次日盘面验证。</div>' +
+      conceptSectionHtml +
+      '<div class="note-box"><b>行业口径</b>按东财涨停池行业归属分组；<b>概念口径</b>按新浪概念板块成分股重新归组（一只票可属多个概念，跨行业），两者用<b>完全相同</b>的量价规则判定生命周期，可直接对比。<br><b>龙一 / 龙二 / 龙三</b>＝题材内按连板高度→封单比→首封时间→累计涨停数机械排名（与连板天梯「板块龙头」同口径，悬停看封单比/首封时间），仅表当日地位、不代表次日表现。<br>题材阶段完全由量价结构（涨停扩散数 / 连板高度 / 梯队完整度 / 炸板负反馈率 / 板块涨跌幅）机械推导，本页评分不纳入新闻与公告数据（消息面见「明日龙头」模块独立监控）；阶段判断为前瞻性推演，需次日盘面验证。</div>' +
       '</div>' +
       '<div class="card pad"><div class="em-ladder-head">' +
       '<h4 style="font-size:12.5px;margin-bottom:6px">天梯 <span class="small muted" style="font-weight:400">' +

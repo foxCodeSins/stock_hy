@@ -183,12 +183,35 @@ async function buildDashboard(query) {
     if (!sectorSet || !sectorSet.size) sectorSet = null;
   }
 
-  // 3) 市场结构 / 题材 / 复盘
+  // 3) 概念成分映射：用于「主线题材」按概念口径分组（与行业分组并列对比）
+  //    取涨幅居前 + 覆盖面大的概念板块（排除宽基/指数类的泛概念），并发拉成分股；
+  //    getSectorMembers 自带 2 分钟缓存，主看板刷新不会重复打接口。
+  const conceptBoards = (boards.concept || []).filter(b => {
+    const n = String(b.name || '');
+    return !/指数|50|300|500|1000|MSCI|富时|标普|沪股通|深股通|融资融券|机构重仓|基金重仓|预盈|预增|输配电气/.test(n);
+  });
+  const byPct = (a, b) => (Number(b.pct) || 0) - (Number(a.pct) || 0);
+  const candConcepts = [...new Map([
+    ...[...conceptBoards].sort(byPct).slice(0, 10),
+    ...[...conceptBoards].sort((a, b) => (Number(b.members) || 0) - (Number(a.members) || 0)).slice(0, 6)
+  ].map(b => [b.node, b])).values()].slice(0, 14);
+  const conceptSets = await limitedMap(candConcepts, 4, async b => {
+    try { return { name: b.name, set: await ds.getSectorMembers(b.node) }; }
+    catch (e) { return null; }
+  });
+  const conceptMap = {};
+  conceptSets.forEach(m => {
+    if (!m || !m.set || !m.set.size) return;
+    m.set.forEach(c => { (conceptMap[c] = conceptMap[c] || []).push(m.name); });
+  });
+
+  // 4) 市场结构 / 题材 / 复盘
   const ov = an.marketOverview(universe, indices, pools);
   const themes = an.buildThemes(pools, boards);
+  const conceptThemes = an.buildConceptThemes(pools, boards, conceptMap);
   const review = an.reviewPlan(ov, themes, pools);
 
-  // 4) 需要实时快照的代码池
+  // 5) 需要实时快照的代码池
   const codeSet = new Set();
   for (const k of ['zt', 'qs', 'zb', 'dt']) (pools[k] || []).forEach(x => codeSet.add(x.code));
   // 全市场涨幅榜 / 成交额榜补充，用于筛选器覆盖非涨停标的
@@ -202,7 +225,7 @@ async function buildDashboard(query) {
     ? String(latestQT).slice(8, 10) + ':' + String(latestQT).slice(10, 12) + ':' + String(latestQT).slice(12, 14)
     : null;
 
-  // 5) 涨停池个股日K（技术指标 / 反包板识别 / 接力评分共用；上游缓存 5 分钟）
+  // 6) 涨停池个股日K（技术指标 / 反包板识别 / 接力评分共用；上游缓存 5 分钟）
   const ztCodes = (pools.zt || []).slice(0, 45).map(x => x.code);
   const klines = await limitedMap(ztCodes, 5, async c => ds.getKline(c, 90));
   const klineMap = {};
@@ -211,7 +234,7 @@ async function buildDashboard(query) {
   const ctx = { ov, themes, sectorSet };
   const filtersWithSet = { ...f, _sectorSet: sectorSet };
 
-  // 6) 六个模块
+  // 7) 六个模块
   const [picks, lowbuy, opps] = await Promise.all([
     Promise.resolve(an.shortTermPicks(pools, universe, quotes, ctx, f)),
     Promise.resolve(an.boardLowBuy(pools, ov, themes, klineMap, quotes, filtersWithSet)),
@@ -257,7 +280,7 @@ async function buildDashboard(query) {
 
   // 概率随主看板一起下发（按所选窗口缓存；冷启动不阻塞，后台算完后下次刷新带上）
   const edgeStats = getEdgeStatsSnapshot(f.edgeDays);
-  return { meta, overview: ov, review, themes, picks, lowbuy, opportunities: opps, limitDownPool: pools.dt || [], boards, fundFlow, globalMarkets, relay, ai, prevLadder, firstBoardSeed: seed, edgeStats };
+  return { meta, overview: ov, review, themes, conceptThemes, conceptNote: '按新浪概念板块成分股把当日涨停股重新分组（一只票可属多个概念），用与行业题材相同的量价规则判定生命周期；概念分组≥2只成分股涨停才计入。', picks, lowbuy, opportunities: opps, limitDownPool: pools.dt || [], boards, fundFlow, globalMarkets, relay, ai, prevLadder, firstBoardSeed: seed, edgeStats };
 }
 
 /* ─────────── 涨停回调到支撑位（独立模块，避免拖慢主看板） ─────────── */

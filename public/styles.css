@@ -166,6 +166,11 @@ tbody tr.clickable{cursor:pointer}
 .review-left{display:flex;flex-direction:column;gap:10px;min-width:0}
 .review-theme-list{display:flex;flex-direction:column;gap:10px}
 .theme-card{border-left:3px solid var(--purple)}
+/* 概念主线：与行业题材并列，青蓝边 + 概念角标区分口径 */
+.concept-theme-head{display:flex;align-items:baseline;gap:8px;margin:16px 0 9px;padding-top:12px;border-top:1px dashed var(--line)}
+.concept-theme-head h4{font-size:12.5px;margin:0;color:var(--blue2)}
+.review-theme-concept .theme-card-concept{border-left-color:var(--blue2)}
+.concept-tag{background:var(--blue-bg);color:var(--blue2);border-color:#cfe0f7;font-weight:700}
 .theme-meta{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px}
 .theme-dragons{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 9px}
 .th-dragon{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:5px;font-size:11px;line-height:1.5;border:1px solid var(--line);background:#f7f9fc;color:var(--ink2);cursor:help}
