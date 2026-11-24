@@ -130,6 +130,7 @@
 
   /* ── 模块显示配置：顶部导航只展示勾选的模块，持久化到 localStorage ── */
   const MODULE_CFG_KEY = 'stockhy_visible_modules_v1';
+  const NEW_MODULE_IDS = ['ddx']; // 后加模块：老用户已存配置里没有时默认补上，避免升级后看不到
   const MODULES = [
     { id: 'watchlist', label: '自选股' },
     { id: 'review', label: '复盘计划' },
@@ -140,6 +141,7 @@
     { id: 'ai', label: 'AI 分析推荐' },
     { id: 'pullback', label: '涨停回踩支撑' },
     { id: 'support', label: '支撑位反转' },
+    { id: 'ddx', label: 'DDX首红精选' },
     { id: 'dragon', label: '明日龙头' },
     { id: 'auction', label: '集合竞价首板' },
     { id: 'predict', label: '9:25首板预测' },
@@ -154,7 +156,11 @@
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return all;
       const picked = arr.filter(k => MODULE_IDS.indexOf(k) >= 0);
-      return picked.length ? picked : all;             // 配置为空则回退默认，避免无模块可用
+      if (!picked.length) return all;                  // 配置为空则回退默认，避免无模块可用
+      // 新模块在老配置里缺失时补到对应位置，保持 MODULES 顺序
+      NEW_MODULE_IDS.forEach(id => { if (picked.indexOf(id) < 0) picked.push(id); });
+      picked.sort((a, b) => MODULE_IDS.indexOf(a) - MODULE_IDS.indexOf(b));
+      return picked;
     } catch (e) { return all; }
   }
   function moduleCfgSave(ids) {
@@ -173,6 +179,10 @@
     supportOpts: { scan: 600, window: 60, minDraw: 4, bandPct: 3, smallYang: 3, lookback: 6, shape: '全部', board: '全部', sort: 'pop' },
     srFilters: '', srPending: false, srLoadingNote: '',
     srSamples: { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' },
+    ddx: null, ddxLoading: false, ddxError: null, ddxAt: 0, ddxMethodOpen: false,
+    ddxOpts: { scan: 600, window: 60, ddxMin: 0.01, bodyMax: 5, turnMin: 5, board: '全部', sort: 'pop', popOnly: true },
+    ddxFilters: '', ddxPending: false,
+    ddxSamples: { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' },
     bt: null, btLoading: false, btError: null, btOpen: false,
     btDate: 'all', btWindow: 5, btMethodOpen: false,
     dg: null, dgLoading: false, dgError: null, dgAt: 0, dgSelected: null, dgFilters: '',
@@ -221,12 +231,14 @@
       }
       [...$('boardChips').children].forEach(c => c.classList.toggle('active', S.boards.has(c.dataset.board)));
       if (S.tab === 'support' && S.srFilters !== srFilterSignature()) loadSupportReversal(false);
+      if (S.tab === 'ddx' && S.ddxFilters !== ddxFilterSignature()) loadDdxFirstRed(false);
     };
     $('capQuick').onclick = e => {
       const b = e.target.closest('button'); if (!b) return;
       $('capMin').value = b.dataset.min || ''; $('capMax').value = b.dataset.max || '';
       [...$('capQuick').children].forEach(c => c.classList.toggle('active', c === b));
       if (S.tab === 'support' && S.srFilters !== srFilterSignature()) loadSupportReversal(false);
+      if (S.tab === 'ddx' && S.ddxFilters !== ddxFilterSignature()) loadDdxFirstRed(false);
     };
     $('tabs').onclick = e => {
       const t = e.target.closest('.tab'); if (!t) return;
@@ -247,6 +259,7 @@
     ['capMin', 'capMax'].forEach(id => {
       $(id).addEventListener('change', () => {
         if (S.tab === 'support' && S.srFilters !== srFilterSignature()) loadSupportReversal(false);
+      if (S.tab === 'ddx' && S.ddxFilters !== ddxFilterSignature()) loadDdxFirstRed(false);
       });
     });
     // 历史优势组合统计窗口（两处卡片共用同一委托）
@@ -287,7 +300,7 @@
     applyModuleCfg();
     const qs = new URLSearchParams(location.search);
     const initTab = qs.get('tab');
-    if (initTab && ['watchlist', 'review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'support', 'dragon', 'auction', 'predict', 'enlighten'].indexOf(initTab) >= 0) switchTab(initTab);
+    if (initTab && ['watchlist', 'review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'support', 'ddx', 'dragon', 'auction', 'predict', 'enlighten'].indexOf(initTab) >= 0) switchTab(initTab);
     // 深链：?stock=000001&period=week 直接打开个股K线弹窗
     const initStock = qs.get('stock');
     if (/^\d{6}$/.test(initStock || '')) {
@@ -426,6 +439,8 @@
         (S.dgFilters !== S.lastFilters || Date.now() - S.dgAt > 60000)) loadDragon(false);
       // 支撑位反转：板块 / 市值筛选作用于服务端候选池，条件变了必须重新回测
       if (S.tab === 'support' && S.srFilters !== srFilterSignature(f)) loadSupportReversal(false);
+      // DDX首红精选：板块 / 市值筛选同样作用于候选池
+      if (S.tab === 'ddx' && S.ddxFilters !== ddxFilterSignature(f)) loadDdxFirstRed(false);
       if (S.watch.list.length) refreshWatchQuotes(false);
       $('loading').classList.add('hide');
       $('alertBox').style.display = 'none';
@@ -498,11 +513,12 @@
     syncBodyScrollLock();
     S.tab = t;
     [...$('tabs').children].forEach(c => c.classList.toggle('active', c.dataset.tab === t));
-    ['watchlist', 'review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'support', 'dragon', 'auction', 'predict', 'enlighten'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
+    ['watchlist', 'review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'support', 'ddx', 'dragon', 'auction', 'predict', 'enlighten'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
     if (t === 'watchlist') { renderWatchlist(); refreshWatchQuotes(true); }
     if (t === 'pullback' && !S.pull && !S.pullLoading) loadPullback(false);
     if (t === 'support' && !S.supportLoading &&
       (!S.support || S.srFilters !== srFilterSignature())) loadSupportReversal(false);
+    if (t === 'ddx' && !S.ddxLoading && (!S.ddx || S.ddxFilters !== ddxFilterSignature())) loadDdxFirstRed(false);
     if (t === 'dragon') {
       const histParam = new URLSearchParams(location.search).get('hist');
       if (histParam && /^\d{8}$/.test(histParam)) {
@@ -540,6 +556,7 @@
     $('badgeAI').textContent = m.aiConfigured ? '已接模型' : '本地';
     if (S.pull) $('badgePull').textContent = (S.pull.list || []).length;
     if (S.support) $('badgeSupport').textContent = ((S.support.result && S.support.result.list) || []).length || '—';
+    if (S.ddx) $('badgeDdx').textContent = ((S.ddx.result && S.ddx.result.list) || []).length || '—';
     if (S.en) $('badgeEn').textContent = (S.en.best ? String(S.en.best.name).slice(0, 6) : '已回测');
     if (S.auction) $('badgeAuction').textContent = (S.auction.list || []).length || '—';
     if (S.predict) $('badgePredict').textContent = (S.predict.summary && S.predict.summary.focus) || '—';
@@ -3401,6 +3418,195 @@
         // 失败时不再立即补跑，交给下一次主刷新重试，避免接口异常时连续打满请求
         if (!failed) setTimeout(() => loadSupportReversal(true), 0);
       }
+    }
+  }
+
+  /* ═══════════ DDX首红精选 · 复刻东财 ddx1120 动态分组 ═══════════ */
+  function ddxMethodCard() {
+    const meth = (S.ddx && S.ddx.result && S.ddx.result.method) || {};
+    const points = meth.points || [];
+    const open = S.ddxMethodOpen;
+    return '<div class="card pad dg-card" style="margin-top:12px">' +
+      '<div class="dg-card-head"><h4>口径与免责说明</h4>' +
+      '<button class="btn btn-ghost btn-sm" id="ddxMethodToggle">' + (open ? '收起' : '查看') + '全部口径</button></div>' +
+      '<div id="ddxMethodBody" style="display:' + (open ? '' : 'none') + '">' +
+      points.map(p => '<div class="kv"><span class="k">' + E(p.name) + '</span><span class="v">' + E(p.text) + '</span></div>').join('') +
+      '</div></div>';
+  }
+  function ddxFilterSignature(f) {
+    const x = f || collectFilters();
+    return [x.board || '全部', x.capMin || '', x.capMax || '', S.ddxOpts.board || '全部'].join('|');
+  }
+  function ddxAppliedFilters(m) {
+    const f = (m && m.filters) || {};
+    const out = ['市场板块=' + (f.boards && f.boards.length ? f.boards.join('/') : (f.board || '全部'))];
+    if (f.localBoard) out.push('模块板块=' + f.localBoard);
+    if ((f.capMin !== null && f.capMin !== undefined) || (f.capMax !== null && f.capMax !== undefined)) {
+      out.push('流通市值=' + (f.capMin === null || f.capMin === undefined ? '0' : f.capMin) + '~' +
+        (f.capMax === null || f.capMax === undefined ? '∞' : f.capMax) + '亿');
+    }
+    if (m && m.eligibleCount !== undefined && m.eligibleCount !== null) out.push('命中候选 ' + m.eligibleCount + ' 只');
+    if (m && m.usedCodes !== undefined && m.usedCodes !== null) out.push('有效样本池 ' + m.usedCodes + ' 只');
+    return out.join(' · ');
+  }
+  function ddxQueryParams() {
+    const o = S.ddxOpts, f = collectFilters();
+    const q = new URLSearchParams({
+      scan: String(o.scan), window: String(o.window),
+      ddxMin: String(o.ddxMin), bodyMax: String(o.bodyMax), turnMin: String(o.turnMin)
+    });
+    ['board', 'capMin', 'capMax'].forEach(k => {
+      if (f[k] !== '' && f[k] !== undefined && f[k] !== null) q.set(k, f[k]);
+    });
+    q.set('ddxBoard', o.board || '全部');
+    return q;
+  }
+  const DDX_SAMPLE_PAGE = 80;
+  function ddxSampleKey() { return ddxQueryParams().toString(); }
+  function ddxSampleRow(s) {
+    return '<tr><td>' + E(s.date) + '</td><td class="left"><span class="stock-link" data-stock-code="' + E(s.code) + '">' + E(s.name) + '</span> <span class="em-code">' + E(s.code) + '</span></td>' +
+      '<td>' + E(s.ddx) + '%</td><td>' + E(s.body) + '%</td><td>' + E(s.turnover) + '%</td><td class="up">' + E(s.pct) + '%</td>' +
+      '<td>' + (s.pending ? '<span class="muted">待验证</span>' : (s.next && s.next.limitUp ? '<b class="up">涨停</b>' : '<span class="down">' + E(s.next && s.next.pct) + '%</span>')) + '</td>' +
+      '<td class="' + (s.next && s.next.retOC > 0 ? 'up' : 'down') + '">' + (s.pending || !s.next ? '—' : E(s.next.retOC) + '%') + '</td>' +
+      '<td class="' + (s.next && s.next.retCC > 0 ? 'up' : 'down') + '">' + (s.pending || !s.next ? '—' : E(s.next.retCC) + '%') + '</td></tr>';
+  }
+  function renderDdxSampleRows() {
+    const st = S.ddxSamples, body = $('ddxSamplesBody'); if (!body) return;
+    body.innerHTML = st.rows.map(ddxSampleRow).join('');
+    const cnt = $('ddxSampleCount'); if (cnt) cnt.textContent = '已载入 ' + st.rows.length + ' / ' + (st.total || 0) + ' 条';
+    const hint = $('ddxSampleHint'); if (hint) hint.style.display = st.done ? 'none' : '';
+    const more = $('ddxSampleMore'); if (more) more.style.display = st.done ? 'none' : '';
+  }
+  async function loadDdxSamples(reset) {
+    const st = S.ddxSamples, key = ddxSampleKey();
+    if (st.loading) return;
+    if (reset || st.key !== key) { st.key = key; st.rows = []; st.offset = 0; st.total = null; st.done = false; st.error = ''; }
+    if (st.done) return;
+    st.loading = true;
+    const q = ddxQueryParams(); q.set('offset', String(st.offset)); q.set('limit', String(DDX_SAMPLE_PAGE));
+    try {
+      const resp = await fetch('/api/ddx-first-red/samples?' + q.toString(), { cache: 'no-store' });
+      const j = await resp.json();
+      if (!resp.ok || !j.ok) throw new Error(j.error || ('HTTP ' + resp.status));
+      st.rows = st.rows.concat(j.rows || []); st.offset = st.offset + (j.rows || []).length; st.total = j.total;
+      st.done = st.offset >= (j.total || 0);
+      renderDdxSampleRows();
+    } catch (e) {
+      st.error = e.message;
+      const hint = $('ddxSampleHint'); if (hint) hint.textContent = '样本载入失败：' + E(e.message);
+    } finally { st.loading = false; }
+  }
+  function bindDdxSamples() {
+    const box = $('ddxSamplesScroll');
+    if (box) box.onscroll = () => { if (box.scrollTop + box.clientHeight >= box.scrollHeight - 160) loadDdxSamples(false); };
+    const more = $('ddxSampleMore'); if (more) more.onclick = () => loadDdxSamples(false);
+  }
+  function renderDdxFirstRed() {
+    const j = S.ddx; if (!j) return;
+    if (!j.ok || !j.result) {
+      $('pane-ddx').innerHTML = '<div class="card empty"><b>回测失败：' + E(j.error || '数据不足') + '</b><br>' +
+        '<span class="small muted">' + (isConnError(j) ? E(SERVICE_HINT) : '服务端或上游数据源返回异常；系统不会用推测数据填充。') + '</span></div>' +
+        '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="ddxRetry">重新回测</button></div>';
+      const rb = $('ddxRetry'); if (rb) rb.onclick = () => loadDdxFirstRed(true);
+      return;
+    }
+    const m = j.meta || {}, r = j.result, ov = r.overall || {}, o = S.ddxOpts;
+    const kpi = (label, val, cls) => '<div class="pb-kpi"><span>' + label + '</span><b class="' + (cls || '') + '">' + (val === null || val === undefined ? '—' : val) + '</b></div>';
+    const head = '<div class="card pad">' +
+      '<div class="pb-controls">' +
+      '<label>扫描 <select class="sel" id="ddxScan"><option value="300">300 只</option><option value="600" selected>600 只</option><option value="900">900 只</option><option value="1200">1200 只</option></select></label>' +
+      '<label>回测 <select class="sel" id="ddxWindow"><option value="30">近 30 日</option><option value="60" selected>近 60 日</option><option value="90">近 90 日</option><option value="120">近 120 日</option></select></label>' +
+      '<label>DDX代理≥ <select class="sel" id="ddxDdxMin"><option value="0.01" selected>0.01%</option><option value="0.05">0.05%</option><option value="0.1">0.1%</option><option value="0.3">0.3%</option><option value="0.5">0.5%</option></select></label>' +
+      '<label>实体≤ <select class="sel" id="ddxBodyMax"><option value="3">3%</option><option value="5" selected>5%</option><option value="8">8%</option></select></label>' +
+      '<label>换手≥ <select class="sel" id="ddxTurnMin"><option value="3">3%</option><option value="5" selected>5%</option><option value="8">8%</option><option value="10">10%</option></select></label>' +
+      '<label>板块 <select class="sel" id="ddxBoard"><option value="全部">全部</option><option value="主板">主板</option><option value="创业板">创业板</option><option value="科创板">科创板</option></select></label>' +
+      '<button class="btn btn-primary" id="ddxRefresh">重新回测</button>' +
+      '<span class="small muted">复刻东财 ddx1120：当日DDX≥阈值 + 前一日<0 + 实体&lt;上限 + 换手≥下限 + 未炸板；首次约 30~90 秒</span></div>' +
+      '<div class="small" style="margin-top:8px"><b>已生效筛选</b>：' + E(ddxAppliedFilters(m)) + '</div>' +
+      '<div class="small muted" style="margin-top:5px">' + E(m.candidateNote || '') + '</div></div>';
+    // 回填 select 当前值
+    const setSel = (id, v) => { const el = $(id); if (el) el.value = String(v); };
+    const kpis = '<div class="card pad" style="margin-top:12px"><div class="sr-kpis">' +
+      kpi('有效样本 / 信号', r.counted + ' / ' + r.signalCount) +
+      kpi('次日涨停率', ov.limitRate === null ? '—' : ov.limitRate + '%', 'up') +
+      kpi('次日开→收 均收益', ov.retOC === null ? '—' : (ov.retOC > 0 ? '+' : '') + ov.retOC + '%', ov.retOC > 0 ? 'up' : 'down') +
+      kpi('信号收→次收 均收益', ov.retCC === null ? '—' : (ov.retCC > 0 ? '+' : '') + ov.retCC + '%', ov.retCC > 0 ? 'up' : 'down') +
+      kpi('次日上涨占比(开→收)', ov.winOC === null ? '—' : ov.winOC + '%') +
+      kpi('最新信号日', r.latestDate || '—') + '</div>' +
+      '<div class="small muted" style="margin-top:8px">DDX口径：' + E(r.fundCaliber || '') + ' · 源：' + E(r.realSource || '') + '</div></div>';
+    const tierRows = (arr, label) => arr.map(t => '<tr><td>' + E(label) + ' ' + E(t.label) + '</td><td>' + t.n + '</td><td class="' + (t.limitRate > 0 ? 'up' : '') + '">' + (t.n < 8 ? '—' : E(t.limitRate) + '%') + '</td><td>' + (t.n < 8 ? '—' : E(t.retOC) + '%') + '</td><td>' + (t.n < 8 ? '—' : E(t.retCC) + '%') + '</td><td>' + (t.n < 8 ? '—' : E(t.winOC) + '%') + '</td></tr>').join('');
+    const tiers = '<div class="card pad" style="margin-top:12px"><div class="sm-block-head"><h4>分档对比（次日涨停率 / 收益）</h4><span class="small muted">样本 &lt;8 只显示计数不显示概率</span></div>' +
+      '<div class="tbl-wrap"><table><thead><tr><th>分档</th><th>样本</th><th>次日涨停率</th><th>开→收均收益</th><th>收→收均收益</th><th>上涨占比</th></tr></thead><tbody>' +
+      tierRows(r.ddxTiers || [], 'DDX') + tierRows(r.turnTiers || [], '换手') + '</tbody></table></div></div>';
+
+    let list = (r.list || []).slice();
+    if (o.popOnly) list = list.filter(x => x.popTop500);
+    const rankOf = x => Number(x.popRank) > 0 ? Number(x.popRank) : Infinity;
+    const byPop = o.sort === 'pop' && Number(m.popularityCount) > 0;
+    list.sort((a, b) => byPop ? (rankOf(a) - rankOf(b) || (b.ddx - a.ddx)) : ((b.ddx - a.ddx) || (b.turnover - a.turnover)));
+    const listCard = '<div class="card pad" style="margin-top:12px"><div class="sm-block-head"><h4>最新信号股（' + E(r.latestDate || '') + ' · ' + list.length + ' 只）</h4>' +
+      '<span class="small muted"><label>人气门槛 </label><select class="sel sel-sm" id="ddxPopOnly"><option value="1"' + (o.popOnly ? ' selected' : '') + '>仅前500</option><option value="0"' + (!o.popOnly ? ' selected' : '') + '>不限</option></select>' +
+      ' <label>排序 </label><select class="sel sel-sm" id="ddxSort"><option value="pop"' + (o.sort === 'pop' ? ' selected' : '') + '>股吧人气</option><option value="ddx"' + (o.sort === 'ddx' ? ' selected' : '') + '>DDX代理</option></select>' +
+      ' · 概率=历史同口径次日涨停率</span></div>' +
+      '<div class="small muted" style="margin:2px 0 8px">' + E(m.popularityNote || '') + '</div>' +
+      '<div class="sr-list">' + (list.length ? list.map(x => '<div class="pb-item" data-code="' + E(x.code) + '">' +
+        '<div class="pb-item-top"><span class="stock-link" data-stock-code="' + E(x.code) + '"><b>' + E(x.name) + '</b> <span class="em-code">' + E(x.code) + '</span></span>' +
+        '<span class="tag blue">DDX ' + E(x.ddx) + '%</span><span class="tag">实体 ' + E(x.body) + '%</span><span class="tag">换手 ' + E(x.turnover) + '%</span>' +
+        (x.popTop500 ? '<span class="tag blue">人气 #' + E(x.popRank) + '</span>' : (x.popRank ? '<span class="tag">人气 #' + E(x.popRank) + '</span>' : '')) +
+        '<span class="sr-spacer"></span><span class="sr-prob">次日涨停率 <b>' + (x.prob === null ? '—' : E(x.prob) + '%') + '</b></span></div>' +
+        '<div class="pb-item-meta"><span>收盘 ' + E(x.close) + '</span><span>当日 ' + E(x.pct) + '%</span><span>主力净额 ' + E(x.mainYi) + '亿</span><span>流通市值 ' + E(x.floatCap) + '亿</span><span>预期开→收 ' + E(x.expOC) + '%</span></div>' +
+        '<div class="small muted" style="margin-top:5px">' + E((x.basis || []).join(' · ')) + '</div></div>').join('') : '<div class="empty">当前人气门槛下无信号，切「不限」查看全部</div>') + '</div></div>';
+
+    const sampleCard = '<div class="card pad" style="margin-top:12px"><div class="sm-block-head"><h4>最近信号样本（含次日结果）</h4><span class="small muted" id="ddxSampleCount">载入中…</span></div>' +
+      '<div class="small muted" style="margin:2px 0 8px">pending=最新信号日尚无次日数据；按信号日由近到远排列，向下滚动查看更早记录</div>' +
+      '<div class="tbl-wrap sr-samples-wrap" id="ddxSamplesScroll"><table><thead><tr><th>信号日</th><th class="left">个股</th><th>DDX代理</th><th>实体</th><th>换手</th><th>当日</th><th>次日涨停</th><th>开→收</th><th>收→收</th></tr></thead><tbody id="ddxSamplesBody"></tbody></table></div>' +
+      '<div class="small muted sr-sample-hint" id="ddxSampleHint">向下滚动可继续查看更早的历史信号</div>' +
+      '<button class="btn btn-ghost btn-sm" id="ddxSampleMore" style="display:none;margin-top:8px">加载更早的样本</button></div>';
+
+    $('pane-ddx').innerHTML = head + kpis + tiers + listCard + sampleCard + ddxMethodCard() +
+      '<div class="disclaimer" style="margin-top:14px"><strong>免责声明</strong>：' + E(m.disclaimer || '') + '</div>';
+    // 回填控件值（render 会重建 DOM，必须每次设置）
+    setSel('ddxScan', o.scan); setSel('ddxWindow', o.window); setSel('ddxDdxMin', o.ddxMin);
+    setSel('ddxBodyMax', o.bodyMax); setSel('ddxTurnMin', o.turnMin); setSel('ddxBoard', o.board);
+    $('ddxScan').onchange = e => { S.ddxOpts.scan = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxWindow').onchange = e => { S.ddxOpts.window = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxDdxMin').onchange = e => { S.ddxOpts.ddxMin = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxBodyMax').onchange = e => { S.ddxOpts.bodyMax = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxTurnMin').onchange = e => { S.ddxOpts.turnMin = Number(e.target.value); loadDdxFirstRed(true); };
+    $('ddxBoard').onchange = e => { S.ddxOpts.board = e.target.value; loadDdxFirstRed(true); };
+    $('ddxRefresh').onclick = () => loadDdxFirstRed(true);
+    $('ddxPopOnly').onchange = e => { S.ddxOpts.popOnly = e.target.value === '1'; renderDdxFirstRed(); };
+    $('ddxSort').onchange = e => { S.ddxOpts.sort = e.target.value; renderDdxFirstRed(); };
+    const mt = $('ddxMethodToggle'); if (mt) mt.onclick = () => { S.ddxMethodOpen = !S.ddxMethodOpen; renderDdxFirstRed(); };
+    bindDdxSamples();
+    renderDdxSampleRows();
+    if (!S.ddxSamples.rows.length) loadDdxSamples(true);
+  }
+  async function loadDdxFirstRed(force) {
+    if (S.ddxLoading) { S.ddxPending = true; return; }
+    S.ddxLoading = true;
+    const sig = ddxFilterSignature(); S.ddxFilters = sig;
+    if (!S.ddx) $('pane-ddx').innerHTML = '<div class="card empty">正在按「当日DDX代理翻红 + 实体&lt;5% + 换手≥5% + 未炸板」筛选个股并回测次日表现…<br><span class="small muted">首次需拉取数百只个股的日K与资金流，约 30~90 秒。</span></div>';
+    else renderDdxFirstRed();
+    const q = ddxQueryParams(); if (force) q.set('force', '1');
+    let failed = false;
+    try {
+      const resp = await fetch('/api/ddx-first-red?' + q.toString(), { cache: 'no-store' });
+      const j = await resp.json();
+      if (!resp.ok || j.error) throw new Error(j.error || ('HTTP ' + resp.status));
+      S.ddx = j; S.ddxAt = Date.now(); S.ddxError = null; S.ddxFilters = sig;
+      S.ddxSamples = { key: '', rows: [], offset: 0, total: null, loading: false, done: false, error: '' };
+      renderDdxFirstRed();
+      $('badgeDdx').textContent = ((j.result && j.result.list) || []).length || '—';
+    } catch (e) {
+      failed = true; S.ddxError = e.message; S.ddxFilters = '';
+      $('badgeDdx').textContent = '—';
+      $('pane-ddx').innerHTML = '<div class="card empty"><b>回测失败：' + E(e.message) + '</b><br><span class="small muted">' + (isConnError(e) ? E(SERVICE_HINT) : '服务端或上游数据源返回异常；系统不会用推测数据填充。') + '</span></div>' +
+        '<div class="card pad" style="margin-top:12px"><button class="btn btn-primary" id="ddxRetry">重新回测</button></div>';
+      const rb = $('ddxRetry'); if (rb) rb.onclick = () => loadDdxFirstRed(true);
+    } finally {
+      S.ddxLoading = false;
+      if (S.ddxPending) { S.ddxPending = false; if (!failed) setTimeout(() => loadDdxFirstRed(true), 0); }
     }
   }
 

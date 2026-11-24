@@ -873,6 +873,143 @@ async function getSupportReversalSamples(query) {
   };
 }
 
+/* ── DDX首红精选：复刻东财 ddx1120 动态分组（DDX代理 + 实体<5% + 换手≥5% + 未炸板） ── */
+const ddxCache = { values: new Map(), inflight: null, inflightKey: '' };
+const ddxNumOrNull = v => (v === '' || v === undefined || v === null) ? null : (Number.isFinite(Number(v)) ? Number(v) : null);
+function ddxKey(query) {
+  return JSON.stringify({
+    scan: query.scan || '', window: query.window || '',
+    ddxMin: query.ddxMin || '', bodyMax: query.bodyMax || '', turnMin: query.turnMin || '',
+    board: String(query.board || '全部').trim() || '全部',
+    ddxBoard: String(query.ddxBoard || '全部').trim() || '全部',
+    capMin: ddxNumOrNull(query.capMin), capMax: ddxNumOrNull(query.capMax)
+  });
+}
+
+async function getDdxFirstRed(query, force) {
+  const boardRaw = String(query.board || '全部').trim() || '全部';
+  const globalBoards = boardRaw !== '全部' && boardRaw !== 'all' ? boardRaw.split(',').map(s => s.trim()).filter(Boolean) : null;
+  const ddxBoard = String(query.ddxBoard || '全部').trim() || '全部';
+  const localBoard = ddxBoard !== '全部' && ddxBoard !== 'all' ? ddxBoard : null;
+  const capMin = ddxNumOrNull(query.capMin), capMax = ddxNumOrNull(query.capMax);
+  const key = ddxKey(query);
+  const cached = ddxCache.values.get(key);
+  if (!force && cached && Date.now() - cached.at < 600000) return cached.value;
+  if (ddxCache.inflight && ddxCache.inflightKey === key) return ddxCache.inflight;
+  if (ddxCache.inflight) { try { await ddxCache.inflight; } catch (e) { } return getDdxFirstRed(query, force); }
+
+  const boardOk = b => (!globalBoards || globalBoards.includes(b)) && (!localBoard || b === localBoard);
+  const allowBJ = !localBoard && !!globalBoards && globalBoards.includes('北交所');
+  const capOk = x => {
+    if (capMin === null && capMax === null) return true;
+    const cap = Number(x && x.floatCap);
+    if (!Number.isFinite(cap) || cap <= 0) return false;
+    if (capMin !== null && cap < capMin) return false;
+    if (capMax !== null && cap > capMax) return false;
+    return true;
+  };
+  const baseOk = x => !!x && !!x.code && !x.isST && !/ST/i.test(x.name || '') &&
+    (/^(60|00|30|68)/.test(x.code) || (allowBJ && /^(8|4|92)/.test(x.code))) &&
+    Number(x.price) > 2 && Number(x.amount) > 2e7;
+  const filterDesc = ['市场板块=' + (globalBoards ? globalBoards.join('/') : '全部')];
+  if (localBoard) filterDesc.push('模块板块=' + localBoard);
+  if (capMin !== null || capMax !== null) filterDesc.push('流通市值=' + (capMin === null ? '0' : capMin) + '~' + (capMax === null ? '∞' : capMax) + '亿');
+
+  ddxCache.inflightKey = key;
+  const job = (async () => {
+    const t0 = Date.now();
+    try {
+      const scan = Math.max(80, Math.min(1200, Number(query.scan) || 600));
+      const universe = await ds.getUniverse().catch(() => ({ list: [] }));
+      const universeAll = universe.list || [];
+      const eligible = universeAll
+        .filter(x => baseOk(x) && boardOk(x.board || ds.boardOf(x.code)) && capOk(x) && Number(x.floatCap) > 0)
+        .sort((a, b) => (b.amount || 0) - (a.amount || 0));
+      const cand = eligible.slice(0, scan);
+      const kdata = await limitedMap(cand, 7, async x => ds.getKlineData(x.code, 130).catch(() => null));
+      const fdata = await limitedMap(cand, 7, async x => ds.getFundHistory(x.code, 100).catch(() => ({ rows: [], source: null })));
+      const inputs = [];
+      const fundSources = new Map();
+      let noKline = 0, noFund = 0;
+      cand.forEach((x, i) => {
+        const kd = kdata[i], fd = fdata[i];
+        if (!kd || !kd.rows || kd.rows.length < 30) { noKline++; return; }
+        if (!fd || !fd.rows || fd.rows.length < 8) { noFund++; return; }
+        if (fd.source) fundSources.set(fd.source, (fundSources.get(fd.source) || 0) + 1);
+        inputs.push({
+          code: x.code, name: x.name, board: ds.boardOf(x.code), industry: x.industry || '',
+          floatCap: Number(x.floatCap),
+          klines: kd.rows, fund: fd.rows
+        });
+      });
+      const srcList = [...fundSources.entries()].sort((a, b) => b[1] - a[1]);
+      const mainSrc = srcList.length ? srcList[0][0] : null;
+      const caliber = mainSrc && /新浪/.test(mainSrc)
+        ? 'DDX代理=主力净额/流通市值（新浪口径=超大单，非东财超大单+大单；东财不可用时的降级源）'
+        : 'DDX代理=主力净额/流通市值（东财口径=超大单+大单）';
+      const result = an.ddxFirstRedBacktest(inputs, {
+        window: query.window, ddxMin: query.ddxMin, bodyMax: query.bodyMax, turnMin: query.turnMin,
+        fundSource: srcList.map(([s, n]) => s + ' ' + n + ' 只').join(' / ') || null,
+        fundCaliber: caliber,
+        klineSource: '腾讯证券前复权日K（失败降级新浪不复权并逐只标注）'
+      });
+      // 人气门槛只对当日信号生效（无历史序列）：标注排名，并默认按人气前500筛选
+      const popMap = await ds.getEastmoneyPopularity((result.list || []).map(x => x.code)).catch(() => ({}));
+      (result.list || []).forEach(x => {
+        const p = popMap[x.code];
+        x.popRank = p && Number(p.rank) > 0 ? Number(p.rank) : null;
+        x.popTop500 = x.popRank !== null && x.popRank <= 500;
+      });
+      const popCount = (result.list || []).filter(x => x.popRank !== null).length;
+      const allSamples = (result.samples || []).map(s => ({
+        date: s.date, code: s.code, name: s.name, board: s.board || null, floatCap: s.floatCap,
+        ddx: s.ddx, body: s.body, turnover: s.turnover, pct: s.pct, main: s.main,
+        pending: !!s.pending,
+        next: s.next ? { limitUp: !!s.next.limitUp, pct: s.next.pct, retOC: s.next.retOC, retCC: s.next.retCC } : null
+      }));
+      result.samples = allSamples.slice(0, 120);
+      result.sampleTotal = allSamples.length;
+      const meta = {
+        scannedCandidates: cand.length, usedCodes: inputs.length, noKline, noFund, scan,
+        elapsedMs: Date.now() - t0,
+        fundSources: srcList.map(([source, n]) => ({ source, n })), fundCaliber: caliber,
+        filters: { board: boardRaw, boards: globalBoards, ddxBoard, localBoard, capMin, capMax },
+        universeCount: universeAll.length, eligibleCount: eligible.length,
+        sampleTotal: allSamples.length, popularityCount: popCount,
+        popularityNote: '股吧人气=东方财富股吧实时人气榜（数字越小越热）。人气前500为东财分组条件之一，但无历史序列，仅对最新信号标注并可选过滤，不参与历史回测。' +
+          (popCount > 0 ? '' : ' 当前人气接口不可用，页面按 DDX代理强度排序。'),
+        filterDesc: filterDesc.join(' · '),
+        candidateNote: '候选=非ST A股按成交额降序前 ' + scan + ' 只；须有有效流通市值（DDX代理与换手率依赖）；成交额过滤>2000万、股价>2元。当前生效筛选：' + filterDesc.join(' · ') + '。',
+        asOf: result.asOf, disclaimer: DISCLAIMER
+      };
+      const value = { ok: true, meta, result, allSamples };
+      ddxCache.values.set(key, { at: Date.now(), value });
+      while (ddxCache.values.size > 8) ddxCache.values.delete(ddxCache.values.keys().next().value);
+      ddxCache.inflight = null; ddxCache.inflightKey = '';
+      return value;
+    } catch (e) {
+      ddxCache.inflight = null; ddxCache.inflightKey = '';
+      throw e;
+    }
+  })();
+  ddxCache.inflight = job;
+  return job;
+}
+
+async function getDdxFirstRedSamples(query) {
+  const key = ddxKey(query);
+  let entry = ddxCache.values.get(key);
+  if (!entry || Date.now() - entry.at >= 600000) {
+    try { await getDdxFirstRed(query, false); entry = ddxCache.values.get(key); }
+    catch (e) { return { ok: false, error: '回测尚未完成：' + String(e && e.message || e) }; }
+  }
+  if (!entry) return { ok: false, error: '当前筛选的回测结果尚未生成，请点「重新回测」后重试' };
+  const all = entry.value.allSamples || [];
+  const offset = Math.max(0, Math.floor(Number(query.offset) || 0));
+  const limit = Math.max(10, Math.min(200, Math.floor(Number(query.limit) || 80)));
+  return { ok: true, total: all.length, offset, limit, rows: all.slice(offset, offset + limit), asOf: entry.value.result && entry.value.result.asOf };
+}
+
 async function getBacktest(query, force) {
   const key = JSON.stringify({
     window: query.window || '', days: query.days || '',
@@ -1766,6 +1903,11 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, { ok: v.ok, meta: v.meta, result: v.result });
     }
     if (u.pathname === '/api/support-reversal/samples') return sendJson(res, await getSupportReversalSamples(q));
+    if (u.pathname === '/api/ddx-first-red') {
+      const v = await getDdxFirstRed(q, q.force === '1');
+      return sendJson(res, { ok: v.ok, meta: v.meta, result: v.result });
+    }
+    if (u.pathname === '/api/ddx-first-red/samples') return sendJson(res, await getDdxFirstRedSamples(q));
     if (u.pathname === '/api/backtest') return sendJson(res, await getBacktest(q, q.force === '1'));
     if (u.pathname === '/api/dragon') return sendJson(res, await getDragon(q, q.force === '1'));
     if (u.pathname === '/api/dragon/edge-stats') {
