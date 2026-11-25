@@ -715,6 +715,10 @@
       const sealCls = br === 0 ? 'em-br none' : br <= 2 ? 'em-br some' : 'em-br many';
       const sr = sectorRole.get(x.code) || { role: '', reason: '' };
       const edge = dgEdgeOf(x.dragonEdge);
+      // 累计板型：东财 zttj 口径「近 N 日涨停 M 次」。反包票连续板数被低估，单独标出 N天M板（与明日龙头 boardLabelOf 同口径）
+      const bNow = Number(x.boards) || 1;
+      const cumB = Number(x.statCount) || bNow, cumD = Number(x.statDays) || 0;
+      const cumLabel = (cumD > 0 && cumB > bNow && cumB >= 2) ? cumD + '天' + cumB + '板' : '';
       // 历史回放的标记由 /api/ladder 按「截至该日」的窗口重新计算，不使用今日回测结果
       const seed = x.seedMark || null;
       let cardCls = 'em-stock', corner = '', style = '';
@@ -730,11 +734,16 @@
         style = ' style="--fs:' + E(seed.color) + ';--fs-bg:' + E(seed.bg) + '"';
       }
       const ttl = x.name + '(' + x.code + ') · ' + (x.industry || '—') + '\n板块地位：' + sr.role + '（' + sr.reason + '）' +
+        (cumLabel ? '\n累计板型：' + cumLabel + '（近 ' + cumD + ' 日累计涨停 ' + cumB + ' 次，当前连续 ' + bNow +
+          ' 板；属反包 / 断板再板，非连续 ' + cumB + ' 连板）' : '') +
         (edge ? '\n历史优势组合：' + dgEdgeTitle(edge) : '') +
         (seed ? '\n首板种子：' + seed.label + '，历史晋级 ' + seed.prob + '% / 成龙 ' + seed.dragonProb +
           '%（命中 ' + seed.score + ' 项：' + seed.reasons.join('、') + '）' : '');
+      const cumTag = cumLabel
+        ? '<span class="em-cum" title="近 ' + cumD + ' 日累计涨停 ' + cumB + ' 次，当前连续 ' + bNow + ' 板（反包 / 断板再板）">' + E(cumLabel) + '</span>'
+        : '';
       return '<div class="' + cardCls + '"' + corner + style + ' title="' + E(ttl) + '">' +
-        '<div class="em-stock-head"><b>' + sn(x.code, x.name) + '</b><span class="em-code">' + E(x.code) + '</span></div>' +
+        '<div class="em-stock-head"><b>' + sn(x.code, x.name) + '</b>' + cumTag + '<span class="em-code">' + E(x.code) + '</span></div>' +
         '<div class="em-stock-ind">' + E(x.industry || '—') +
         (sr.role ? '<span class="em-role ' + roleCls(sr.role) + '">' + E(sr.role) + '</span>' : '') + '</div>' +
         '<div class="em-stock-meta"><span>首封 ' + E(x.firstSeal || '—') + '</span>' +
@@ -959,7 +968,7 @@
           (S.ladderMarks.edge ? dgEdgeLegendCard(true) : '') +
           (S.ladderMarks.seed ? seedLegendCard(ladderIsHistory ? (S.ladderData.firstBoardSeed || null) : d.firstBoardSeed, ladderIsHistory) : '') +
           '<div class="note-box">空间板：' + space + '<br>梯队判读：' + E(ov.gap ? '存在断层，按 leader-game 框架属退潮前置信号，需次日 2/3 板补齐确认。' : '梯队连续无断层，情绪延续性优于断层结构。') +
-          '<br>板块地位标注规则（按东财行业分组机械判定，非投资建议）：<b class="up">板块龙头</b>=同行业连板最高且封单最强；<b style="color:var(--warn)">反包核心 / 题材龙 / 封单核心</b>=累计板最高 / 连板最高 / 封单最强但不同时满足龙头条件；板块跟风=连板低于行业最高；独苗=行业仅 1 只涨停。<br>每层按封单比降序、首封时间升序排列；封单比 ≥1% 标红、0.3%~1% 标橙、&lt;0.3% 标灰，炸板次数越多风险越高。数据：东方财富涨停池 + 腾讯证券实时快照。' +
+          '<br>板块地位标注规则（按东财行业分组机械判定，非投资建议）：<b class="up">板块龙头</b>=同行业连板最高且封单最强；<b style="color:var(--warn)">反包核心 / 题材龙 / 封单核心</b>=累计板最高 / 连板最高 / 封单最强但不同时满足龙头条件；板块跟风=连板低于行业最高；独苗=行业仅 1 只涨停。<br>每层按封单比降序、首封时间升序排列；封单比 ≥1% 标红、0.3%~1% 标橙、&lt;0.3% 标灰，炸板次数越多风险越高。<b class="cum-inline">N天M板</b>＝近 N 个交易日累计涨停 M 次、但连续连板不足的<b>反包 / 断板再板</b>票（东财 zttj 口径，与「明日龙头」板型标签同规则），天梯按其<b>连续连板数</b>分层，故此类票的累计高度需看该标签；纯连续连板票不显示。数据：东方财富涨停池 + 腾讯证券实时快照。' +
           '</div>') +
       '</div></div>' +
       '</div>' +
