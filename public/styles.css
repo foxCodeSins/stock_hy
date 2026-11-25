@@ -627,6 +627,13 @@ ul.tight li{margin-bottom:2px}
 .dg-edge.edge-space,.dg-edge-row.edge-space,.dg-edge-legend-item.edge-space,.dg-edge-inline.edge-space{--edge:#d92b2b;--edge-bg:#fdecec}
 .dg-edge.edge-cum,.dg-edge-row.edge-cum,.dg-edge-legend-item.edge-cum,.dg-edge-inline.edge-cum{--edge:#6d4bd6;--edge-bg:#f1edfd}
 .dg-edge.edge-theme,.dg-edge-row.edge-theme,.dg-edge-legend-item.edge-theme,.dg-edge-inline.edge-theme{--edge:#2f6fd0;--edge-bg:#eaf2fd}
+/* 晋级率达标但样本不足：虚线边框，区别于实线的高置信组合 */
+.dg-edge.dashed,.dg-edge-row.dashed,.dg-edge-legend-item.dashed,.em-stock.dg-edge.dashed{border-style:dashed}
+.dg-edge-inline.dashed{border:1px dashed var(--edge);background:#fff;color:var(--edge)}
+tbody tr.dg-edge-row.dashed td{border-top-style:dashed;border-bottom-style:dashed}
+tbody tr.dg-edge-row.dashed td:first-child{border-left-style:dashed}
+tbody tr.dg-edge-row.dashed td:last-child{border-right-style:dashed}
+.dg-edge-cell.dashed b{font-style:italic}
 .dg-item.dg-edge{position:relative;border:1.5px solid var(--edge);border-radius:9px;margin:6px 7px;padding:9px 11px;background:var(--edge-bg)}
 .dg-item.dg-edge:last-child{border-bottom:1.5px solid var(--edge)}
 .dg-item.dg-edge:hover{background:var(--edge-bg)}

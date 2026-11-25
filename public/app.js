@@ -2166,10 +2166,11 @@
     const marks = (S.edgeStats && S.edgeStats.marks) || [];
     if (marks.indexOf(key) < 0) return null;
     const c = edgeStatOf(key);
-    if (!c || c.smallSample) return null;
+    if (!c) return null;
+    const small = c.smallSample || ((S.edgeStats && S.edgeStats.smallMarks || []).indexOf(key) >= 0);
     const tone = edgeTone(c.rate);
     return {
-      key, cls: tone.cls, color: tone.color, bg: tone.bg,
+      key, cls: tone.cls + (small ? ' dashed' : ''), dashed: small, color: tone.color, bg: tone.bg,
       label: String(x.role) + '+' + String(x.dtype),
       rate: edgeRateText(key), n: c.n || 0
     };
@@ -2181,6 +2182,7 @@
     const c = edgeStatOf(edge.key), w = S.edgeStats && S.edgeStats.window;
     return '实时统计：' + edge.label + ' 晋级率 ' + edge.rate +
       (c ? '（n=' + c.n + '，' + (c.promoted || 0) + ' 次晋级）' : '（统计载入中）') +
+      (edge.dashed ? ' · 样本不足 ' + ((S.edgeStats && S.edgeStats.minSample) || 8) + '，虚线仅供参考' : '') +
       (w ? ' · 窗口 ' + String(w.from || '') + '~' + String(w.to || '') : '') +
       '；仅为历史样本，不代表未来收益';
   }
@@ -2234,7 +2236,7 @@
     }
     const w = st.window || {}, minN = Number(st.minSample) || 8;
     const fmtDate = v => String(v || '').replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
-    const marks = st.marks || [];
+    const marks = st.marks || [], smallMarks = st.smallMarks || [];
     const roles = (st.byRole || []).map(r => String(r.key));
     const dtypes = (st.byDtype || []).map(r => String(r.key));
     const roleOrder = EDGE_ROLES.filter(r => roles.indexOf(r) >= 0).concat(roles.filter(r => EDGE_ROLES.indexOf(r) < 0));
@@ -2250,14 +2252,15 @@
       html += '<tr><th>' + E(role) + '</th>';
       dtypeOrder.forEach(dtype => {
         const key = role + '|' + dtype;
-        const c = st.combos[key], marked = marks.indexOf(key) >= 0;
+        const c = st.combos[key], marked = marks.indexOf(key) >= 0, dashed = smallMarks.indexOf(key) >= 0;
         if (!c || !c.n) { html += '<td class="dg-edge-cell none">—</td>'; return; }
         const tone = edgeTone(c.rate);
         const alpha = Math.max(0, Math.min(0.22, (Number(c.rate) || 0) / 100 * 0.32));
-        const style = 'background:rgba(47,111,208,' + alpha.toFixed(3) + ')' + (marked ? ';border:2px solid ' + tone.color : '');
+        const style = 'background:rgba(47,111,208,' + alpha.toFixed(3) + ')' +
+          (marked ? ';border:2px ' + (dashed ? 'dashed' : 'solid') + ' ' + tone.color : '');
         const tip = role + ' + ' + dtype + '：晋级 ' + c.promoted + '/' + c.n + ' = ' + c.rate + '%' +
-          (c.smallSample ? '（样本不足 ' + minN + '，仅供参考）' : '');
-        html += '<td class="dg-edge-cell' + (marked ? ' marked' : '') + (c.smallSample ? ' small-sample' : '') +
+          (dashed ? '（样本仅 ' + c.n + '，虚线边框仅供参考）' : c.smallSample ? '（样本不足 ' + minN + '，仅供参考）' : '');
+        html += '<td class="dg-edge-cell' + (marked ? ' marked' : '') + (dashed ? ' dashed' : '') + (c.smallSample ? ' small-sample' : '') +
           '" style="' + style + '" title="' + E(tip) + '"><b>' + Number(c.rate).toFixed(1) + '%</b>' +
           '<span class="dg-edge-n">n=' + c.n + '</span></td>';
       });
@@ -2270,9 +2273,9 @@
       E(st.method || '') + '<br>' + E(st.note || '') +
       '<br>彩色边框标记窗口内晋级率 ≥ ' + E((st.markRule || {}).minRate !== undefined ? st.markRule.minRate : 30) +
       '%（全样本基准 ' + E((st.markRule || {}).baselineRate !== undefined ? st.markRule.baselineRate : '—') +
-      '%，取 30% 与「基准+8 个百分点」的较高者）且样本 ≥ ' + minN +
-      ' 的组合，不限于「一致加速」；红 / 紫 / 蓝分别对应 ≥45% / ≥35% / ≥30%。' +
-      '角标与本表数值均取自本次实时统计，样本数 &lt; ' + minN + ' 的组合已淡化显示，不作判断依据。</div>';
+      '%，取 30% 与「基准+8 个百分点」的较高者）的组合，不限于「一致加速」；红 / 紫 / 蓝分别对应 ≥45% / ≥35% / ≥30%。' +
+      '样本 ≥ ' + minN + ' 用实线，' + E((st.markRule || {}).minDashSample || 3) + '~' + (minN - 1) +
+      ' 次观测用虚线边框（仅供参考），更少样本淡化不标记。角标与本表数值均取自本次实时统计。</div>';
     return compact
       ? '<div class="dg-h5" style="margin-top:11px">历史优势组合 · 彩色边框标记</div>' + html
       : '<div class="card pad dg-card dg-edge-legend">' + head + html + '</div>';
