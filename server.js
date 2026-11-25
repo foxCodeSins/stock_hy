@@ -273,6 +273,7 @@ async function buildDashboard(query) {
     Promise.resolve(an.liveOpportunities(pools, boards, universe, quotes, filtersWithSet))
   ]);
   // 连板天梯的历史优势组合标记：与「明日龙头」同一套地位 / 一致分歧规则，不参与任何评分
+  const edgeStats = getEdgeStatsSnapshot(f.edgeDays);
   const dragonEdges = an.dragonEdgeMarks(pools, prevHistory, edgeStats && edgeStats.marks);
   (opps.zt || []).forEach(x => { if (dragonEdges[x.code]) x.dragonEdge = dragonEdges[x.code]; });
   // 首板龙头种子：最近历史回测的分档概率，挂到当日首板卡片（历史日期的天梯不误用当日标记）
@@ -311,7 +312,6 @@ async function buildDashboard(query) {
   };
 
   // 概率随主看板一起下发（按所选窗口缓存；冷启动不阻塞，后台算完后下次刷新带上）
-  const edgeStats = getEdgeStatsSnapshot(f.edgeDays);
   return { meta, overview: ov, review, themes, conceptThemes, conceptNote: '按新浪概念板块成分股把当日涨停股重新分组（一只票可属多个概念），用与行业题材相同的量价规则判定生命周期；概念分组≥2只成分股涨停才计入。', picks, lowbuy, opportunities: opps, limitDownPool: pools.dt || [], boards, fundFlow, globalMarkets, relay, ai, prevLadder, firstBoardSeed: seed, edgeStats };
 }
 
