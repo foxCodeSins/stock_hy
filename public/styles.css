@@ -389,8 +389,8 @@ ul.tight li{margin-bottom:2px}
 .em-stock-head b{font-size:12.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .em-code{font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}
 /* N天M板：近 N 日累计涨停 M 次、连续连板不足的反包票，贴在卡片右下角（与右上角 ★ 晋级角标对角分居） */
-.em-stock.em-cum-card{position:relative;padding-bottom:20px}
-.em-cum{position:absolute;right:-1px;bottom:-1px;z-index:2;padding:2px 6px;border-radius:7px 0 7px 0;background:var(--purple-bg);color:var(--purple);border:1px solid #ded5f7;border-right:none;border-bottom:none;font-size:9.5px;font-weight:700;line-height:1.4;letter-spacing:.2px;white-space:nowrap;cursor:help}
+.em-stock.em-cum-card{position:relative;padding-bottom:24px}
+.em-cum{position:absolute;right:-1px;bottom:-1px;z-index:2;padding:3px 8px;border-radius:7px 0 7px 0;background:var(--purple);color:#fff;border:1px solid var(--purple);border-right:none;border-bottom:none;font-size:10.5px;font-weight:800;line-height:1.4;letter-spacing:.3px;white-space:nowrap;cursor:help;box-shadow:0 1px 3px rgba(109,75,214,.3)}
 .cum-inline{color:var(--purple)}
 .em-stock-ind{font-size:10.5px;color:var(--ink2);margin:3px 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
 .em-role{flex:none;padding:1px 5px;border-radius:3px;font-size:9.5px;font-weight:700;letter-spacing:.2px}
