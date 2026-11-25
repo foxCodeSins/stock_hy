@@ -720,7 +720,7 @@
       let cardCls = 'em-stock', corner = '', style = '';
       // 两类★晋级角标/彩色边框统一受「显示晋级标记」开关控制；title 文字信息无论开关都保留
       if (S.ladderMarks.edge && edge) {
-        cardCls += ' dg-edge edge-' + E(edge.key);
+        cardCls += ' dg-edge edge-' + E(edge.cls);
         corner = ' data-edge-corner="★ ' + E(edge.label) + ' ' + E(edge.rate) + '"';
         style = ' style="' + dgEdgeStyle(edge) + '"';
       }
@@ -2145,13 +2145,14 @@
   /* ═══════════ 明日龙头 · 只做龙头 / 买在分歧卖在一致 ═══════════ */
   const dgDtypeCls = d => ({ '良性分歧': 'red', '一致加速': 'warn', '恶性分歧': 'purple', '分歧偏弱': 'blue', '中性': '' }[d] || '');
   const dgToneCls = t => ({ primary: 'red', warn: 'warn', blue: 'blue', muted: '' }[t] || '');
-  // 「地位 + 一致加速」三类组合的颜色 / 文案是 UI 规则；概率一律取服务端实时统计 S.edgeStats
-  // （随主看板 /api/dashboard 下发，10 分钟重算一次），不再写死历史常量。
-  const DG_EDGE_META = {
-    '空间板|一致加速': { key: 'space', label: '空间板+一致', color: '#d92b2b', bg: '#fdecec' },
-    '累计板龙|一致加速': { key: 'cum', label: '累计板龙+一致', color: '#6d4bd6', bg: '#f1edfd' },
-    '题材龙|一致加速': { key: 'theme', label: '题材龙+一致', color: '#2f6fd0', bg: '#eaf2fd' }
-  };
+  // 彩色边框由服务端按实时晋级率动态筛选：中性 / 良性分歧等高晋级率组合同样标记。
+  // 颜色分档只管展示；哪些组合被标记、概率多少一律取自服务端 S.edgeStats（10 分钟重算）。
+  const EDGE_TONES = [
+    { min: 45, cls: 'high', color: '#d92b2b', bg: '#fdecec' },
+    { min: 35, cls: 'mid', color: '#6d4bd6', bg: '#f1edfd' },
+    { min: 30, cls: 'low', color: '#2f6fd0', bg: '#eaf2fd' }
+  ];
+  const edgeTone = rate => EDGE_TONES.find(t => (Number(rate) || 0) >= t.min) || EDGE_TONES[EDGE_TONES.length - 1];
   const EDGE_ROLES = ['空间板', '累计板龙', '题材龙', '卡位股', '容量中军', '孤立涨停', '后排/补涨'];
   const EDGE_DTYPES = ['一致加速', '良性分歧', '分歧偏弱', '恶性分歧', '中性'];
   const edgeStatOf = key => (S.edgeStats && S.edgeStats.combos && S.edgeStats.combos[key]) || null;
@@ -2160,10 +2161,18 @@
     return c && c.rate !== null && c.rate !== undefined ? Number(c.rate).toFixed(1) + '%' : '—';
   };
   function dgEdgeOf(x) {
-    if (!x || x.dtype !== '一致加速') return null;
-    const key = String(x.role) + '|' + String(x.dtype);
-    const meta = DG_EDGE_META[key]; if (!meta) return null;
-    return Object.assign({}, meta, { key, rate: edgeRateText(key), n: (edgeStatOf(key) || {}).n || 0 });
+    if (!x) return null;
+    const key = String(x.role || '') + '|' + String(x.dtype || '');
+    const marks = (S.edgeStats && S.edgeStats.marks) || [];
+    if (marks.indexOf(key) < 0) return null;
+    const c = edgeStatOf(key);
+    if (!c || c.smallSample) return null;
+    const tone = edgeTone(c.rate);
+    return {
+      key, cls: tone.cls, color: tone.color, bg: tone.bg,
+      label: String(x.role) + '+' + String(x.dtype),
+      rate: edgeRateText(key), n: c.n || 0
+    };
   }
   function dgEdgeStyle(edge) {
     return '--edge:' + edge.color + ';--edge-bg:' + edge.bg;
@@ -2178,7 +2187,7 @@
   function dgEdgeBadge(x) {
     const edge = dgEdgeOf(x);
     if (!edge) return '';
-    return '<span class="dg-edge-inline edge-' + E(edge.key) + '" style="' + dgEdgeStyle(edge) +
+    return '<span class="dg-edge-inline edge-' + E(edge.cls) + '" style="' + dgEdgeStyle(edge) +
       '" title="' + E(dgEdgeTitle(edge)) + '">★ ' + E(edge.label) + ' <span data-edge-rate>' + E(edge.rate) + '</span></span>';
   }
   function edgeDaysControl() {
@@ -2225,7 +2234,7 @@
     }
     const w = st.window || {}, minN = Number(st.minSample) || 8;
     const fmtDate = v => String(v || '').replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
-    const marks = st.marks || Object.keys(DG_EDGE_META);
+    const marks = st.marks || [];
     const roles = (st.byRole || []).map(r => String(r.key));
     const dtypes = (st.byDtype || []).map(r => String(r.key));
     const roleOrder = EDGE_ROLES.filter(r => roles.indexOf(r) >= 0).concat(roles.filter(r => EDGE_ROLES.indexOf(r) < 0));
@@ -2241,10 +2250,11 @@
       html += '<tr><th>' + E(role) + '</th>';
       dtypeOrder.forEach(dtype => {
         const key = role + '|' + dtype;
-        const c = st.combos[key], marked = marks.indexOf(key) >= 0, meta = DG_EDGE_META[key];
+        const c = st.combos[key], marked = marks.indexOf(key) >= 0;
         if (!c || !c.n) { html += '<td class="dg-edge-cell none">—</td>'; return; }
+        const tone = edgeTone(c.rate);
         const alpha = Math.max(0, Math.min(0.22, (Number(c.rate) || 0) / 100 * 0.32));
-        const style = 'background:rgba(47,111,208,' + alpha.toFixed(3) + ')' + (marked && meta ? ';border:2px solid ' + meta.color : '');
+        const style = 'background:rgba(47,111,208,' + alpha.toFixed(3) + ')' + (marked ? ';border:2px solid ' + tone.color : '');
         const tip = role + ' + ' + dtype + '：晋级 ' + c.promoted + '/' + c.n + ' = ' + c.rate + '%' +
           (c.smallSample ? '（样本不足 ' + minN + '，仅供参考）' : '');
         html += '<td class="dg-edge-cell' + (marked ? ' marked' : '') + (c.smallSample ? ' small-sample' : '') +
@@ -2258,8 +2268,11 @@
     html += '<div class="dg-edge-sums"><div><b>按地位：</b>' + line(st.byRole) + '</div><div><b>按状态：</b>' + line(st.byDtype) + '</div></div>';
     html += '<div class="note-box">' + (w.source ? '<b>数据来源：</b>' + E(w.source) + '<br>' : '') +
       E(st.method || '') + '<br>' + E(st.note || '') +
-      '<br>彩色边框仅标记「一致加速 + 空间板 / 累计板龙 / 题材龙」三类组合；角标与本表数值均取自本次实时统计。' +
-      '样本数 &lt; ' + minN + ' 的组合已淡化显示，不作判断依据。</div>';
+      '<br>彩色边框标记窗口内晋级率 ≥ ' + E((st.markRule || {}).minRate !== undefined ? st.markRule.minRate : 30) +
+      '%（全样本基准 ' + E((st.markRule || {}).baselineRate !== undefined ? st.markRule.baselineRate : '—') +
+      '%，取 30% 与「基准+8 个百分点」的较高者）且样本 ≥ ' + minN +
+      ' 的组合，不限于「一致加速」；红 / 紫 / 蓝分别对应 ≥45% / ≥35% / ≥30%。' +
+      '角标与本表数值均取自本次实时统计，样本数 &lt; ' + minN + ' 的组合已淡化显示，不作判断依据。</div>';
     return compact
       ? '<div class="dg-h5" style="margin-top:11px">历史优势组合 · 彩色边框标记</div>' + html
       : '<div class="card pad dg-card dg-edge-legend">' + head + html + '</div>';
@@ -2518,7 +2531,7 @@
   function dgListItems(j) {
     return (j.list || []).map(x => {
       const edge = dgEdgeOf(x);
-      return '<div class="dg-item' + (x.code === S.dgSelected ? ' active' : '') + (edge ? ' dg-edge edge-' + E(edge.key) : '') +
+      return '<div class="dg-item' + (x.code === S.dgSelected ? ' active' : '') + (edge ? ' dg-edge edge-' + E(edge.cls) : '') +
         '" data-code="' + E(x.code) + '"' + (edge ? ' data-edge-corner="★ ' + E(edge.label) + ' ' + E(edge.rate) + '" style="' + dgEdgeStyle(edge) + '" title="' + E(dgEdgeTitle(edge)) + '"' : '') + '>' +
       '<div class="dg-item-top"><b>' + sn(x.code, x.name) + '</b><span class="code muted">' + E(x.code) + '</span>' +
       '<span class="tag ' + dgDtypeCls(x.dtype) + '">' + E(x.dtype) + '</span>' +
@@ -2712,7 +2725,7 @@
           const pc = p.available
             ? dhPct(p.closePct) + '<div class="small muted">开 ' + dhPctSmall(p.openPct) + ' / 高 ' + dhPctSmall(p.highPct) + ' / 低 ' + dhPctSmall(p.lowPct) + '</div>'
             : '<span class="small muted">' + E(p.reason || '无数据') + '</span>';
-          return '<tr' + (edge ? ' class="dg-edge-row edge-' + E(edge.key) + '" style="' + dgEdgeStyle(edge) + '" title="' + E(dgEdgeTitle(edge)) + '"' : '') + '><td><b>' + sn(o.code, o.name) + '</b>' + dgEdgeBadge(o) + '<div class="small muted">' + E(o.code) + (o.theme ? ' · ' + E(o.theme) : '') + '</div></td>' +
+          return '<tr' + (edge ? ' class="dg-edge-row edge-' + E(edge.cls) + '" style="' + dgEdgeStyle(edge) + '" title="' + E(dgEdgeTitle(edge)) + '"' : '') + '><td><b>' + sn(o.code, o.name) + '</b>' + dgEdgeBadge(o) + '<div class="small muted">' + E(o.code) + (o.theme ? ' · ' + E(o.theme) : '') + '</div></td>' +
             '<td>' + E(o.role) + '</td><td>' + E(o.dtype) + '</td><td>' + E(o.boards) + ' 板</td><td>' + (o.nextBoards === null ? '—' : E(o.nextBoards) + ' 板') + '</td>' +
             '<td>' + tag(o.resultLabel, o.result === 'promoted' ? 'red' : o.result === 'broken' ? 'green' : o.result === 'pending' ? '' : 'blue') + '</td>' +
             '<td>' + pc + '</td><td>' + E(o.score) + '</td></tr>';
@@ -2740,7 +2753,7 @@
     const body = list.length
       ? '<div class="dg-layout"><div class="dg-list" id="dhList">' + list.map(x => {
         const edge = dgEdgeOf(x);
-        return '<div class="dg-item' + (x.code === S.dgHistSelected ? ' active' : '') + (edge ? ' dg-edge edge-' + E(edge.key) : '') +
+        return '<div class="dg-item' + (x.code === S.dgHistSelected ? ' active' : '') + (edge ? ' dg-edge edge-' + E(edge.cls) : '') +
           '" data-code="' + E(x.code) + '"' + (edge ? ' data-edge-corner="★ ' + E(edge.label) + ' ' + E(edge.rate) + '" style="' + dgEdgeStyle(edge) + '" title="' + E(dgEdgeTitle(edge)) + '"' : '') + '>' +
         '<div class="dg-item-top"><b>' + sn(x.code, x.name) + '</b><span class="code muted">' + E(x.code) + '</span>' +
         '<span class="tag ' + dgDtypeCls(x.dtype) + '">' + E(x.dtype) + '</span><span class="dg-score">' + E(x.score) + '</span></div>' +

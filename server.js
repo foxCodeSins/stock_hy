@@ -273,7 +273,7 @@ async function buildDashboard(query) {
     Promise.resolve(an.liveOpportunities(pools, boards, universe, quotes, filtersWithSet))
   ]);
   // 连板天梯的历史优势组合标记：与「明日龙头」同一套地位 / 一致分歧规则，不参与任何评分
-  const dragonEdges = an.dragonEdgeMarks(pools, prevHistory);
+  const dragonEdges = an.dragonEdgeMarks(pools, prevHistory, edgeStats && edgeStats.marks);
   (opps.zt || []).forEach(x => { if (dragonEdges[x.code]) x.dragonEdge = dragonEdges[x.code]; });
   // 首板龙头种子：最近历史回测的分档概率，挂到当日首板卡片（历史日期的天梯不误用当日标记）
   const seed = an.firstBoardSeedBacktest(prevHistory, pools, { asOf: beijingNow().now });
@@ -1924,7 +1924,8 @@ const server = http.createServer(async (req, res) => {
           factors: seed.factors, note: seed.note, asOf: wanted
         };
       } catch (e) { console.warn('[ladder] 首板种子标记失败：' + e.message); }
-      try { dragonEdges = an.dragonEdgeMarks(dayPools, histUpTo); }
+      const edgeSnapshot = getEdgeStatsSnapshot(q.edgeDays);
+      try { dragonEdges = an.dragonEdgeMarks(dayPools, histUpTo, edgeSnapshot && edgeSnapshot.marks); }
       catch (e) { console.warn('[ladder] 历史优势组合标记失败：' + e.message); }
       const markedZt = zt.map(x => Object.assign({}, x, {
         seedMark: seedMarks[x.code] || null,
