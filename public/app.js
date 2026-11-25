@@ -721,7 +721,7 @@
       const cumLabel = (cumD > 0 && cumB > bNow && cumB >= 2) ? cumD + '天' + cumB + '板' : '';
       // 历史回放的标记由 /api/ladder 按「截至该日」的窗口重新计算，不使用今日回测结果
       const seed = x.seedMark || null;
-      let cardCls = 'em-stock', corner = '', style = '';
+      let cardCls = 'em-stock' + (cumLabel ? ' em-cum-card' : ''), corner = '', style = '';
       // 两类★晋级角标/彩色边框统一受「显示晋级标记」开关控制；title 文字信息无论开关都保留
       if (S.ladderMarks.edge && edge) {
         cardCls += ' dg-edge edge-' + E(edge.cls);
@@ -743,13 +743,13 @@
         ? '<span class="em-cum" title="近 ' + cumD + ' 日累计涨停 ' + cumB + ' 次，当前连续 ' + bNow + ' 板（反包 / 断板再板）">' + E(cumLabel) + '</span>'
         : '';
       return '<div class="' + cardCls + '"' + corner + style + ' title="' + E(ttl) + '">' +
-        '<div class="em-stock-head"><b>' + sn(x.code, x.name) + '</b>' + cumTag + '<span class="em-code">' + E(x.code) + '</span></div>' +
+        '<div class="em-stock-head"><b>' + sn(x.code, x.name) + '</b><span class="em-code">' + E(x.code) + '</span></div>' +
         '<div class="em-stock-ind">' + E(x.industry || '—') +
         (sr.role ? '<span class="em-role ' + roleCls(sr.role) + '">' + E(sr.role) + '</span>' : '') + '</div>' +
         '<div class="em-stock-meta"><span>首封 ' + E(x.firstSeal || '—') + '</span>' +
         '<span class="' + clsPct + '">封 ' + N(seal) + '%</span></div>' +
         '<div class="em-stock-meta"><span class="' + sealCls + '">' + (br === 0 ? '零炸板' : '炸板 ' + br + ' 次') + '</span>' +
-        '<span>换手 ' + N(x.turnover) + '%</span></div></div>';
+        '<span>换手 ' + N(x.turnover) + '%</span></div>' + cumTag + '</div>';
     };
     const tiersHtml = [...byBoard.keys()].sort((a, b) => b - a).map(b => {
       const list = byBoard.get(b).slice().sort((a, c) =>
