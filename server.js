@@ -279,6 +279,7 @@ async function buildDashboard(query) {
   // 首板龙头种子：最近历史回测的分档概率，挂到当日首板卡片（历史日期的天梯不误用当日标记）
   const seed = an.firstBoardSeedBacktest(prevHistory, pools, { asOf: beijingNow().now });
   (opps.zt || []).forEach(x => { if (seed.marks[x.code]) x.seedMark = seed.marks[x.code]; });
+  (opps.zt || []).forEach(x => { if (seed.cumMarks && seed.cumMarks[x.code]) x.cumRate = seed.cumMarks[x.code]; });
   const relay = an.relayPicks(pools, ov, themes, klineMap, quotes, filtersWithSet);
   // 昨日连板天梯今日晋级情况：用已发生的历史池 + 今日快照，保守判定晋级 / 回封 / 断板
   const prevLadder = an.prevLadderProgress(prevHistory, pools, quotes);
@@ -1914,13 +1915,15 @@ const server = http.createServer(async (req, res) => {
         ? { dates: (hist.dates || []).slice(idx), byDate: hist.byDate, source: hist.source }
         : hist;
       const dayPools = { zt, zb, dt, date: wanted };
-      let seedStat = null, seedMarks = {}, dragonEdges = {};
+      let seedStat = null, seedMarks = {}, cumMarks = {}, dragonEdges = {};
       try {
         const seed = an.firstBoardSeedBacktest(histUpTo, dayPools, { asOf: wanted });
         seedMarks = seed.marks || {};
+        cumMarks = seed.cumMarks || {};
         seedStat = {
           days: seed.days, samples: seed.samples, baseRate: seed.baseRate,
           dragonBaseRate: seed.dragonBaseRate, tiers: seed.tiers,
+          cumBase: seed.cumBase, cumTiers: seed.cumTiers, cumCountTiers: seed.cumCountTiers,
           factors: seed.factors, note: seed.note, asOf: wanted
         };
       } catch (e) { console.warn('[ladder] 首板种子标记失败：' + e.message); }
@@ -1929,6 +1932,7 @@ const server = http.createServer(async (req, res) => {
       catch (e) { console.warn('[ladder] 历史优势组合标记失败：' + e.message); }
       const markedZt = zt.map(x => Object.assign({}, x, {
         seedMark: seedMarks[x.code] || null,
+        cumRate: cumMarks[x.code] || null,
         dragonEdge: dragonEdges[x.code] || null
       }));
       return sendJson(res, {
