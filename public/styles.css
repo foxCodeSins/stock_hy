@@ -462,8 +462,6 @@ ul.tight li{margin-bottom:2px}
 
 @media(max-width:1280px){.kpi-strip{grid-template-columns:repeat(4,1fr)}.frow,.frow:nth-child(2){grid-template-columns:1fr 1fr}.grid4{grid-template-columns:repeat(2,1fr)}.ai-form{grid-template-columns:1fr 1fr}}
 @media(max-width:900px){.grid2,.grid3,.lb-grid,.footer-grid,.fact-list{grid-template-columns:1fr}.kpi-strip{grid-template-columns:repeat(2,1fr)}.frow,.frow:nth-child(2){grid-template-columns:1fr}.status-cluster{gap:10px}.plan-row{grid-template-columns:1fr}.plan-row .col{border-right:none;padding:6px 0}.ai-form{grid-template-columns:1fr}.ai-mode-actions{width:100%}}
-@media(max-width:1280px){.kpi-strip{grid-template-columns:repeat(4,1fr)}.frow,.frow:nth-child(2){grid-template-columns:1fr 1fr}.grid4{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:900px){.grid2,.grid3,.lb-grid,.footer-grid,.fact-list{grid-template-columns:1fr}.kpi-strip{grid-template-columns:repeat(2,1fr)}.frow,.frow:nth-child(2){grid-template-columns:1fr}.status-cluster{gap:10px}.plan-row{grid-template-columns:1fr}.plan-row .col{border-right:none;padding:6px 0}}
 
 /* ─── 涨停回踩支撑模块（K线图 + 划线解释） ─── */
 .tab-new{color:#0f7b6c}

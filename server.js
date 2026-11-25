@@ -140,8 +140,40 @@ function serveStatic(req, res, urlPath) {
 }
 
 /* ─────────── 数据聚合 ─────────── */
-const dashCache = { at: 0, value: null, key: '' };
-const dashInflight = new Map();
+// 统一缓存：inflight 按 key 去重，force 请求等旧任务结束后重算，不会被旧结果覆盖。
+const CACHE_SLOTS = 16;
+function createCache(ttl) { return { values: new Map(), inflight: new Map(), ttl }; }
+function invalidateCache(c) { c.values.clear(); }
+function cacheSet(c, key, value) {
+  c.values.delete(key);
+  c.values.set(key, { at: Date.now(), value });
+  if (c.values.size > CACHE_SLOTS) c.values.delete(c.values.keys().next().value);
+}
+async function cachedCall(c, key, force, producer) {
+  const started = Date.now();
+  const hit = c.values.get(key);
+  if (!force && hit && started - hit.at < c.ttl) {
+    c.values.delete(key); c.values.set(key, hit); // 刷新 LRU 顺序
+    return hit.value;
+  }
+  const running = c.inflight.get(key);
+  if (running) {
+    if (!force) return running;
+    try { await running; } catch (e) { /* 旧任务失败不影响重算 */ }
+    const fresh = c.values.get(key);
+    if (fresh && fresh.at > started) return fresh.value;
+  }
+  const job = (async () => { const v = await producer(); cacheSet(c, key, v); return v; })();
+  c.inflight.set(key, job);
+  try { return await job; } finally { if (c.inflight.get(key) === job) c.inflight.delete(key); }
+}
+// 控制参数不参与缓存键，避免点一次刷新后缓存永久穿透
+function cleanCacheKey(query) {
+  const o = {};
+  Object.keys(query || {}).sort().forEach(k => { if (k !== '_' && k !== 'force') o[k] = query[k]; });
+  return JSON.stringify(o);
+}
+const dashCache = createCache(9000);
 
 async function limitedMap(items, limit, fn) {
   const out = new Array(items.length);
@@ -284,7 +316,7 @@ async function buildDashboard(query) {
 }
 
 /* ─────────── 涨停回调到支撑位（独立模块，避免拖慢主看板） ─────────── */
-const pullCache = { at: 0, key: '', value: null, inflight: null };
+const pullCache = createCache(180000);
 
 async function buildPullback(query) {
   const t0 = Date.now();
@@ -541,39 +573,15 @@ async function getStockChart(query) {
 }
 
 async function getPullback(query, force) {
-  const now = Date.now();
-  const key = JSON.stringify(query);
-  if (!force && pullCache.value && pullCache.key === key && now - pullCache.at < 180000) return pullCache.value;
-  if (pullCache.inflight) return pullCache.inflight;
-  pullCache.inflight = (async () => {
-    try {
-      const v = await buildPullback(query);
-      pullCache.value = v; pullCache.key = key; pullCache.at = Date.now();
-      return v;
-    } finally { pullCache.inflight = null; }
-  })();
-  return pullCache.inflight;
+  return cachedCall(pullCache, cleanCacheKey(query), force, () => buildPullback(query));
 }
 
 async function getDashboard(query, force) {
-  const now = Date.now();
-  const key = JSON.stringify(query);
-  if (!force && dashCache.value && dashCache.key === key && now - dashCache.at < 9000) return dashCache.value;
-  // 不同筛选条件各自持有 inflight，避免并发请求串数据
-  if (dashInflight.has(key)) return dashInflight.get(key);
-  const p = (async () => {
-    try {
-      const v = await buildDashboard(query);
-      dashCache.value = v; dashCache.key = key; dashCache.at = Date.now();
-      return v;
-    } finally { dashInflight.delete(key); }
-  })();
-  dashInflight.set(key, p);
-  return p;
+  return cachedCall(dashCache, cleanCacheKey(query), force, () => buildDashboard(query));
 }
 
 /* ─────────── 涨停回踩支撑 · 历史回溯（成功率） ─────────── */
-const backtestCache = { at: 0, key: '', value: null, inflight: null };
+const backtestCache = createCache(600000);
 const toKlineDate = d => {
   const s = String(d || '');
   return /^\d{8}$/.test(s) ? s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8) : s;
@@ -1028,16 +1036,7 @@ async function getBacktest(query, force) {
     window: query.window || '', days: query.days || '',
     perDay: query.perDay || '', maxCodes: query.maxCodes || ''
   });
-  if (!force && backtestCache.value && backtestCache.key === key && Date.now() - backtestCache.at < 600000) return backtestCache.value;
-  if (backtestCache.inflight) return backtestCache.inflight;
-  backtestCache.inflight = (async () => {
-    try {
-      const v = await buildBacktest(query);
-      backtestCache.value = v; backtestCache.key = key; backtestCache.at = Date.now();
-      return v;
-    } finally { backtestCache.inflight = null; }
-  })();
-  return backtestCache.inflight;
+  return cachedCall(backtestCache, key, force, () => buildBacktest(query));
 }
 
 /* ─────────── 明日龙头 · 只做龙头 / 买在分歧卖在一致 ─────────── */
@@ -1046,26 +1045,17 @@ async function getBacktest(query, force) {
 // 结果随主看板 /api/dashboard 与 /api/dragon 一起下发，前端不再写死概率常量。
 const EDGE_DAYS_OPTIONS = [15, 30, 60, 90];
 const EDGE_DAYS_DEFAULT = 60;
-const edgeStatsCache = { values: new Map(), inflight: new Map() };
+const edgeStatsCache = createCache(600000);
 function edgeDaysOf(days) {
   const n = Math.floor(Number(days));
   return Number.isFinite(n) && n > 0 ? Math.min(90, Math.max(5, n)) : EDGE_DAYS_DEFAULT;
 }
 async function getEdgeStats(days, force) {
   const d = edgeDaysOf(days);
-  const hit = edgeStatsCache.values.get(d);
-  if (!force && hit && Date.now() - hit.at < 600000) return hit.value;
-  if (edgeStatsCache.inflight.has(d)) return edgeStatsCache.inflight.get(d);
-  const job = (async () => {
-    try {
-      const history = await ds.getLongPoolHistory(d).catch(() => ({ dates: [], byDate: {} }));
-      const value = an.dragonEdgeStats(history, { days: d, maxCandidates: 200 });
-      edgeStatsCache.values.set(d, { at: Date.now(), value });
-      return value;
-    } finally { edgeStatsCache.inflight.delete(d); }
-  })();
-  edgeStatsCache.inflight.set(d, job);
-  return job;
+  return cachedCall(edgeStatsCache, d, force, async () => {
+    const history = await ds.getLongPoolHistory(d).catch(() => ({ dates: [], byDate: {} }));
+    return an.dragonEdgeStats(history, { days: d, maxCandidates: 200 });
+  });
 }
 /** 主看板下发用：冷启动时先返回 null 不阻塞首屏，统计在后台跑，下次刷新自然带上 */
 function getEdgeStatsSnapshot(days) {
@@ -1076,7 +1066,7 @@ function getEdgeStatsSnapshot(days) {
   return null;
 }
 
-const dragonCache = { at: 0, key: '', value: null, inflight: null };
+const dragonCache = createCache(90000);
 
 async function buildDragon(query) {
   const t0 = Date.now();
@@ -1205,20 +1195,11 @@ async function getDragon(query, force) {
     sort: query.sort || '', sortDir: query.sortDir || '', limit: query.limit || '',
     showAll: query.showAll || '', role: query.role || ''
   });
-  if (!force && dragonCache.value && dragonCache.key === key && Date.now() - dragonCache.at < 90000) return dragonCache.value;
-  if (dragonCache.inflight) return dragonCache.inflight;
-  dragonCache.inflight = (async () => {
-    try {
-      const v = await buildDragon(query);
-      dragonCache.value = v; dragonCache.key = key; dragonCache.at = Date.now();
-      return v;
-    } finally { dragonCache.inflight = null; }
-  })();
-  return dragonCache.inflight;
+  return cachedCall(dragonCache, key, force, () => buildDragon(query));
 }
 
 /* ─────────── 明日龙头 · 历史回放（逐日重放 + 事后晋级验证） ─────────── */
-const dragonReviewCache = { key: '', value: null, at: 0, inflight: null };
+const dragonReviewCache = createCache(300000);
 
 async function getDragonReview(query, force) {
   let date = String(query.date || '').replace(/\D/g, '');
@@ -1229,12 +1210,9 @@ async function getDragonReview(query, force) {
     limit: query.limit || '', board: query.board || '', capMin: query.capMin || '',
     capMax: query.capMax || '', excludeST: query.excludeST || '', keyword: query.keyword || ''
   });
-  if (!force && dragonReviewCache.value && dragonReviewCache.key === key && Date.now() - dragonReviewCache.at < 300000) return dragonReviewCache.value;
-  if (dragonReviewCache.inflight) return dragonReviewCache.inflight;
-  dragonReviewCache.inflight = (async () => {
+  return cachedCall(dragonReviewCache, key, force, async () => {
     const t0 = Date.now();
-    try {
-      const history = await ds.getPoolFullHistory(days);
+    const history = await ds.getPoolFullHistory(days);
       if (!date && (history.dates || []).length) date = String(history.dates[0].date);
       const options = {
         date,
@@ -1282,16 +1260,12 @@ async function getDragonReview(query, force) {
         dataSourceNote: g.metaNote + '；历史回放不接实时快照 / 指数 / 概念映射，「昨日连板今日溢价」按中性计，与当日实时版温度不直接可比。',
         disclaimer: DISCLAIMER
       };
-      const value = { meta, ...g };
-      dragonReviewCache.value = value; dragonReviewCache.key = key; dragonReviewCache.at = Date.now();
-      return value;
-    } finally { dragonReviewCache.inflight = null; }
-  })();
-  return dragonReviewCache.inflight;
+      return { meta, ...g };
+  });
 }
 
 /* ─────────── 消息面实时监控（公告 + 7×24 快讯，独立短缓存与新增标记） ─────────── */
-const newsCache = { value: null, key: '', at: 0, inflight: null };
+const newsCache = createCache(20000);
 const newsSeen = new Map();     // 条目 ID → 服务端首次发现时间（ms），用于「新增」标记
 let newsWarm = false;           // 首轮只建立基线，不把所有历史消息都标成新增
 
@@ -1362,18 +1336,7 @@ async function buildNews(query) {
 
 async function getNews(query, force) {
   const key = JSON.stringify({ window: query.window || '', scope: query.scope || '', codes: query.codes || '', limit: query.limit || '' });
-  let data;
-  if (!force && newsCache.value && newsCache.key === key && Date.now() - newsCache.at < 20000) {
-    data = newsCache.value;
-  } else if (newsCache.inflight) {
-    data = await newsCache.inflight;
-  } else {
-    newsCache.inflight = buildNews(query).then(v => {
-      newsCache.value = v; newsCache.key = key; newsCache.at = Date.now();
-      return v;
-    }).finally(() => { newsCache.inflight = null; });
-    data = await newsCache.inflight;
-  }
+  const data = await cachedCall(newsCache, key, force, () => buildNews(query));
 
   // 每轮按服务端首次发现时间重算「新增」，首轮只建基线
   const nowMs = Date.now();
@@ -1411,7 +1374,7 @@ async function getNews(query, force) {
 }
 
 /* ─────────── 龙场悟道 · 多方法回测选优 ─────────── */
-const enlightenCache = { at: 0, key: '', value: null, inflight: null };
+const enlightenCache = createCache(600000);
 
 async function buildEnlightenment(query) {
   const t0 = Date.now();
@@ -1495,20 +1458,11 @@ async function buildEnlightenment(query) {
 
 async function getEnlightenment(query, force) {
   const key = JSON.stringify({ days: query.days || '', perDay: query.perDay || '', minSamples: query.minSamples || '' });
-  if (!force && enlightenCache.value && enlightenCache.key === key && Date.now() - enlightenCache.at < 600000) return enlightenCache.value;
-  if (enlightenCache.inflight) return enlightenCache.inflight;
-  enlightenCache.inflight = (async () => {
-    try {
-      const v = await buildEnlightenment(query);
-      enlightenCache.value = v; enlightenCache.key = key; enlightenCache.at = Date.now();
-      return v;
-    } finally { enlightenCache.inflight = null; }
-  })();
-  return enlightenCache.inflight;
+  return cachedCall(enlightenCache, key, force, () => buildEnlightenment(query));
 }
 
 /* ─────────── 集合竞价 · 首板封板概率（历史回测） ─────────── */
-const auctionCache = { at: 0, key: '', value: null, inflight: null };
+const auctionCache = createCache(600000);
 
 async function buildAuction(query) {
   const t0 = Date.now();
@@ -1565,23 +1519,14 @@ async function buildAuction(query) {
 
 async function getAuction(query, force) {
   const key = JSON.stringify({ days: query.days || '' });
-  if (!force && auctionCache.value && auctionCache.key === key && Date.now() - auctionCache.at < 600000) return auctionCache.value;
-  if (auctionCache.inflight) return auctionCache.inflight;
-  auctionCache.inflight = (async () => {
-    try {
-      const v = await buildAuction(query);
-      auctionCache.value = v; auctionCache.key = key; auctionCache.at = Date.now();
-      return v;
-    } finally { auctionCache.inflight = null; }
-  })();
-  return auctionCache.inflight;
+  return cachedCall(auctionCache, key, force, () => buildAuction(query));
 }
 
 
 /* ─────────── 集合竞价 · 9:25 首板预测（落盘 / 回填 / 校准） ─────────── */
 const PRED_DIR = path.join(__dirname, 'data', 'predictions');
 try { fs.mkdirSync(PRED_DIR, { recursive: true }); } catch (e) { /* 只读环境忽略 */ }
-const predictCache = { at: 0, key: '', value: null, inflight: null };
+const predictCache = createCache(300000);
 const predR1 = x => Math.round(x * 10) / 10;   // 保留1位小数
 const predBoardOf = code => { const c = String(code || ''); if (/^(30|68[89])/.test(c)) return '创业板/科创'; if (/^[48]/.test(c) || /^92/.test(c)) return '北交所'; return '主板'; };
 const PRED_CALIB_MIN_DAYS = 20;
@@ -1697,7 +1642,7 @@ async function backfillPrediction(tradeDate) {
   rec.stat = { total: rec.list.length, withResult: n, sealed: rec.list.filter(x => x.result === 1).length };
   writePrediction(d, rec);
   // 回填后让预测缓存失效，保证下次读取拿到带结果的快照
-  predictCache.key = ''; predictCache.value = null;
+  invalidateCache(predictCache);
   return rec;
 }
 
@@ -1854,16 +1799,7 @@ async function buildPredict(query) {
 
 async function getPredict(query, force) {
   const key = JSON.stringify({ date: query.date || '', mode: query.mode || '' });
-  if (!force && predictCache.value && predictCache.key === key && Date.now() - predictCache.at < 300000) return predictCache.value;
-  if (predictCache.inflight) return predictCache.inflight;
-  predictCache.inflight = (async () => {
-    try {
-      const v = await buildPredict(query);
-      predictCache.value = v; predictCache.key = key; predictCache.at = Date.now();
-      return v;
-    } finally { predictCache.inflight = null; }
-  })();
-  return predictCache.inflight;
+  return cachedCall(predictCache, key, force, () => buildPredict(query));
 }
 
 /* ─────────── 路由 ─────────── */

@@ -171,6 +171,7 @@
     data: null, prevPrices: {}, tab: 'review', boards: new Set(['全部']),
     visibleModules: moduleCfgLoad(),
     freq: 15, tick: 0, timer: null, boardsList: null,
+    dirty: {}, refreshing: false, refreshSeq: 0, edgeDaysPending: null,
     collapsed: new Set(), expanded: new Set(), chartsReady: !!window.echarts,
     lastFilters: '', aiCfgOpen: false, aiText: '', aiTextTime: '',
     pull: null, pullLoading: false, pullAt: 0, pullSelected: null,
@@ -417,6 +418,9 @@
   }
 
   async function refresh(force) {
+    if (S.refreshing && !force) return;             // 定时轮询不与在途请求叠加
+    const seq = ++S.refreshSeq;
+    S.refreshing = true;
     const f = collectFilters();
     const q = new URLSearchParams();
     Object.keys(f).forEach(k => { if (f[k] !== '' && f[k] !== undefined) q.set(k, f[k]); });
@@ -427,6 +431,7 @@
       const r = await fetch('/api/dashboard?' + q.toString(), { cache: 'no-store' });
       const j = await r.json();
       if (j.error) throw new Error(j.error);
+      if (seq !== S.refreshSeq) return;              // 旧响应不得覆盖新数据
       S.prevPrices = pricesOf(S.data);
       S.data = j;
       if (j.edgeStats && (!j.edgeStats.window || Number(j.edgeStats.window.requestedDays) === S.edgeDays)) S.edgeStats = j.edgeStats;
@@ -452,6 +457,7 @@
           ? SERVICE_HINT + ' 可点击「立即刷新」重试。'
           : '可点击「立即刷新」重试；若上游接口临时不可用，系统会在恢复后自动重新拉取。');
     } finally {
+      if (seq === S.refreshSeq) S.refreshing = false;
       $('btnRefresh').disabled = false;
       S.tick = 0;
       refreshCountdown(); // 交易状态变化后，立即同步「下次刷新」显示
@@ -495,8 +501,9 @@
     };
     $('mcHint').textContent = '已选 ' + S.visibleModules.length + ' / ' + MODULES.length + ' 个模块';
     $('moduleCfgMask').style.display = 'flex';
+    syncBodyScrollLock();
   }
-  function closeModuleCfg() { $('moduleCfgMask').style.display = 'none'; }
+  function closeModuleCfg() { $('moduleCfgMask').style.display = 'none'; syncBodyScrollLock(); }
   function saveModuleCfg() {
     const picked = [...$('mcList').querySelectorAll('input:checked')].map(i => i.dataset.mod);
     if (!picked.length) { $('mcHint').textContent = '至少保留一个模块'; return; }
@@ -514,7 +521,13 @@
     S.tab = t;
     [...$('tabs').children].forEach(c => c.classList.toggle('active', c.dataset.tab === t));
     ['watchlist', 'review', 'picks', 'live', 'lowbuy', 'relay', 'ai', 'pullback', 'support', 'ddx', 'dragon', 'auction', 'predict', 'enlighten'].forEach(k => $('pane-' + k).classList.toggle('active', k === t));
-    if (t === 'watchlist') { renderWatchlist(); refreshWatchQuotes(true); }
+    // 停靠在自选股右栏的分时详情，切走后无需继续轮询/重绘
+    if (t !== 'watchlist' && S.chart && S.chart.docked && S.chart.open) stopMinuteTimer();
+    renderPane(t);
+    if (t === 'watchlist') {
+      renderWatchlist(); refreshWatchQuotes(true);
+      if (S.chart && S.chart.open && S.chart.docked && S.chart.period === 'minute') syncMinuteTimer();
+    }
     if (t === 'pullback' && !S.pull && !S.pullLoading) loadPullback(false);
     if (t === 'support' && !S.supportLoading &&
       (!S.support || S.srFilters !== srFilterSignature())) loadSupportReversal(false);
@@ -534,19 +547,25 @@
   }
 
   /* ─────────────── 渲染入口 ─────────────── */
+  // 主看板每轮只重建当前可见模块；隐藏模块标脏，切过去时再补渲染。
+  const PANE_RENDERERS = {
+    review: renderReview, picks: renderPicks, live: renderLive,
+    lowbuy: renderLowBuy, relay: renderRelay, ai: renderAI
+  };
+  function renderPane(tab) {
+    const fn = PANE_RENDERERS[tab];
+    if (fn && S.data) { fn(S.data); S.dirty[tab] = false; }
+  }
   function render() {
     const d = S.data, m = d.meta, ov = d.overview;
     renderMeta(m, ov);
     renderKPI(m, ov);
     renderGlobal(d);
     renderConclusion(m, ov);
-    renderReview(d);
-    renderPicks(d);
-    renderLive(d);
-    renderLowBuy(d);
-    renderRelay(d);
-    renderAI(d);
     renderFooter(d);
+    const current = PANE_RENDERERS[S.tab];
+    if (current) current(d);
+    else Object.keys(PANE_RENDERERS).forEach(k => { S.dirty[k] = true; });
     $('filterSummary').textContent = '当前：' + S.lastFilters;
     $('badgeWatch').textContent = S.watch.list.length;
     $('badgePicks').textContent = (d.picks || []).length;
@@ -1492,6 +1511,10 @@
   function renderAI(d) {
     const ai = d.ai || {}, m = d.meta;
     const configured = !!m.aiConfigured;
+    // 定时刷新不得覆盖正在填写的配置（尤其 API Key 服务端从不回传）
+    const oldBase = $('aiBase') ? $('aiBase').value : '';
+    const oldKey = $('aiKey') ? $('aiKey').value : '';
+    const oldModel = $('aiModel') ? $('aiModel').value : '';
     const sections = (ai.sections || []).map(s =>
       '<div class="info-card"><h4>' + E(s.title) + '</h4><p>' + E(s.body) + '</p>' +
       '<div class="small muted" style="margin-top:7px">依据：' + E((s.basis || []).join('、')) + '</div></div>'
@@ -1515,9 +1538,9 @@
 
       '<div class="card pad ai-config" id="aiConfigPanel" style="display:' + (S.aiCfgOpen ? '' : 'none') + '">' +
       '<h4 style="font-size:12.5px;margin-bottom:8px">OpenAI 兼容接口配置</h4>' +
-      '<div class="ai-form"><label>接口地址 <input type="text" id="aiBase" placeholder="https://api.openai.com/v1" value="' + E(m.aiBase || 'https://api.openai.com/v1') + '"></label>' +
-      '<label>API Key <input type="password" id="aiKey" placeholder="sk-...（仅存服务端内存）"></label>' +
-      '<label>模型名 <input type="text" id="aiModel" placeholder="gpt-4o-mini" value="' + E(m.aiModel || 'gpt-4o-mini') + '"></label></div>' +
+      '<div class="ai-form"><label>接口地址 <input type="text" id="aiBase" placeholder="https://api.openai.com/v1" value="' + E(oldBase || m.aiBase || 'https://api.openai.com/v1') + '"></label>' +
+      '<label>API Key <input type="password" id="aiKey" placeholder="sk-...（仅存服务端内存）" value="' + E(oldKey) + '"></label>' +
+      '<label>模型名 <input type="text" id="aiModel" placeholder="gpt-4o-mini" value="' + E(oldModel || m.aiModel || 'gpt-4o-mini') + '"></label></div>' +
       '<div class="ai-form-actions"><button id="btnAiSave" class="btn btn-primary">保存配置</button><button id="btnAiClear" class="btn">清除并回到本地模式</button>' +
       '<span class="small muted">密钥只保存在本进程内存，不写入任何文件、不出现在日志与接口响应中；服务重启后需重新填写。</span></div></div>' +
 
@@ -2166,7 +2189,8 @@
   /** 切换统计窗口：持久化选择、按新窗口请求统计，并就地刷新两处卡片 */
   async function changeEdgeDays(n) {
     const days = Number(n);
-    if (EDGE_DAYS_OPTIONS.indexOf(days) < 0 || days === S.edgeDays || S.edgeDaysLoading) return;
+    if (EDGE_DAYS_OPTIONS.indexOf(days) < 0 || days === S.edgeDays) return;
+    if (S.edgeDaysLoading) { S.edgeDaysPending = days; return; }  // 记住最后一次选择，完成后补跑
     S.edgeDays = days; edgeDaysSave(); S.edgeDaysLoading = true;
     refreshEdgeLegend();
     try {
@@ -2177,6 +2201,9 @@
     refreshEdgeLegend();
     // 角标 / 徽标也要跟着新概率更新
     try { if (S.dg) renderDragon(); } catch (e) { }
+    const pending = S.edgeDaysPending;
+    S.edgeDaysPending = null;
+    if (pending !== null && pending !== S.edgeDays) changeEdgeDays(pending);
   }
   function refreshEdgeLegend() {
     document.querySelectorAll('.dg-edge-legend-root').forEach(root => {
@@ -3232,13 +3259,18 @@
         : st.done ? '已到最早一条' : '向下滚动继续查看更早数据';
     return '已载入 ' + st.rows.length + ' / ' + total + ' 条历史信号 · ' + tail;
   }
-  function renderSrSampleRows() {
+  function renderSrSampleRows(appendFrom) {
     const body = $('srSamplesBody'), wrap = $('srSamplesScroll'), st = S.srSamples;
     if (!body || !wrap) return;
-    const top = wrap.scrollTop;
-    body.innerHTML = st.rows.length ? st.rows.map(srSampleRow).join('')
-      : '<tr><td colspan="8" class="empty">' + (st.loading ? '正在载入历史信号样本…' : st.error ? '样本载入失败' : '无信号样本') + '</td></tr>';
-    wrap.scrollTop = top;
+    if (appendFrom !== undefined && body.rows.length === appendFrom && st.rows.length > appendFrom) {
+      // 触底追加：只插新行，避免越滚越大时全量重建导致卡顿与跳动
+      body.insertAdjacentHTML('beforeend', st.rows.slice(appendFrom).map(srSampleRow).join(''));
+    } else {
+      const top = wrap.scrollTop;
+      body.innerHTML = st.rows.length ? st.rows.map(srSampleRow).join('')
+        : '<tr><td colspan="8" class="empty">' + (st.loading ? '正在载入历史信号样本…' : st.error ? '样本载入失败' : '无信号样本') + '</td></tr>';
+      wrap.scrollTop = top;
+    }
     const c = $('srSampleCount'); if (c) c.textContent = '共 ' + (st.total === null ? '…' : st.total) + ' 条';
     const h = $('srSampleHint'); if (h) h.textContent = srSampleStatus();
     const more = $('srSampleMore');
@@ -3250,6 +3282,7 @@
     if (st.loading || st.done || !$('srSamplesBody')) return;
     st.loading = true; st.error = '';
     renderSrSampleRows();
+    let appendedFrom = null;
     const q = srQueryParams();
     q.set('offset', String(st.offset)); q.set('limit', String(SR_SAMPLE_PAGE));
     try {
@@ -3257,6 +3290,7 @@
       const j = await resp.json();
       if (!resp.ok || !j.ok) throw new Error(j.error || ('HTTP ' + resp.status));
       if (S.srSamples.key !== key) return; // 筛选已变化，丢弃过期响应
+      appendedFrom = st.rows.length;
       st.rows = st.rows.concat(j.rows || []);
       st.offset += (j.rows || []).length;
       st.total = j.total;
@@ -3265,7 +3299,7 @@
       if (S.srSamples.key === key) st.error = e.message;
     } finally {
       st.loading = false;
-      if (S.srSamples.key === key) renderSrSampleRows();
+      if (S.srSamples.key === key) renderSrSampleRows(appendedFrom === null ? undefined : appendedFrom);
     }
   }
   function bindSrSamples() {
@@ -4140,6 +4174,7 @@
         try {
           const r = await fetch('/api/search?q=' + encodeURIComponent(kw), { cache: 'no-store' });
           const j = await r.json();
+          if (input.value.trim() !== kw) return;      // 输入已变化，丢弃过期结果
           hits = j.list || [];
           if (!hits.length) {
             panel.innerHTML = '<div class="ss-empty">未找到匹配股票（全市场约 5,500 只，可按代码 / 名称 / 拼音首字母匹配，如 dfhy）</div>';
@@ -4162,7 +4197,7 @@
             });
           }
           panel.style.display = 'block';
-        } catch (e) { panel.innerHTML = '<div class="ss-empty">搜索失败：' + E(e.message) + '</div>'; panel.style.display = 'block'; }
+        } catch (e) { if (input.value.trim() !== kw) return; panel.innerHTML = '<div class="ss-empty">搜索失败：' + E(e.message) + '</div>'; panel.style.display = 'block'; }
       }, 220);
     });
     input.addEventListener('keydown', e => {
@@ -4191,8 +4226,9 @@
    * 之前各处直接写 body.style.overflow，停靠态也被锁死且切模块后不会自动恢复。
    */
   function syncBodyScrollLock() {
-    const modal = $('stockModal');
-    document.body.style.overflow = (modal && modal.style.display !== 'none') ? 'hidden' : '';
+    const modal = $('stockModal'), cfg = $('moduleCfgMask');
+    const locked = (modal && modal.style.display !== 'none') || (cfg && cfg.style.display !== 'none');
+    document.body.style.overflow = locked ? 'hidden' : '';
   }
   /** 把个股详情停靠到自选右栏（docked=true）或移回弹窗遮罩（false） */
   function dockDialog(docked) {
@@ -4459,11 +4495,12 @@
   }
   function syncMinuteTimer() {
     const c = S.chart;
-    if (!c || !c.open || c.period !== 'minute' || !c.data || !isTradingNow() || c.histDate) { stopMinuteTimer(); return; }
+    if (!c || !c.open || c.period !== 'minute' || !c.data || !isTradingNow() || c.histDate ||
+      (c.docked && S.tab !== 'watchlist')) { stopMinuteTimer(); return; }
     if (c.minuteTimer) return;
     c.minuteTimer = setInterval(() => {
       const cur = S.chart;
-      if (!cur || !cur.open || cur.period !== 'minute') { stopMinuteTimer(); return; }
+      if (!cur || !cur.open || cur.period !== 'minute' || (cur.docked && S.tab !== 'watchlist')) { stopMinuteTimer(); return; }
       if (!isTradingNow()) { stopMinuteTimer(); renderStockChart(); return; }
       refreshMinuteOnly(cur.code);
     }, 12000);
