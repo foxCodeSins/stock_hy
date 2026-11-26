@@ -10,7 +10,8 @@ const https = require('https');
 const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
-dns.setDefaultResultOrder('ipv4first');
+// Node 16.4+/14.18+ 才有该 API；低版本 Node 忽略即可（请求侧已显式指定 family: 4）
+if (typeof dns.setDefaultResultOrder === 'function') dns.setDefaultResultOrder('ipv4first');
 
 const ds = require('./lib/datasource');
 const an = require('./lib/analytics');
