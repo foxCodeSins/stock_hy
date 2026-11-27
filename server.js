@@ -247,10 +247,16 @@ async function buildDashboard(query) {
   // 5) 需要实时快照的代码池
   const codeSet = new Set();
   for (const k of ['zt', 'qs', 'zb', 'dt']) (pools[k] || []).forEach(x => codeSet.add(x.code));
+  // 昨日连板股必须纳入快照：否则晋级判定拿不到今日涨跌幅，会被误判为「断板收绿」
+  const prevDates = ((prevHistory && prevHistory.dates) || []).map(d => d && (d.date || d));
+  const prevDate = prevDates.length > 1 && prevDates[0] > prevDates[1] ? prevDates[1] : prevDates[0];
+  const prevRows = (((prevHistory && prevHistory.byDate && prevHistory.byDate[prevDate]) || {}).zt) || [];
+  prevRows.filter(x => x && x.code && (Number(x.boards) || 1) >= 2).forEach(x => codeSet.add(x.code));
   // 全市场涨幅榜 / 成交额榜补充，用于筛选器覆盖非涨停标的
   const uniSorted = [...(universe.list || [])].filter(x => x.pct !== null).sort((a, b) => b.pct - a.pct).slice(0, 40);
   uniSorted.forEach(x => codeSet.add(x.code));
-  const codes = [...codeSet].slice(0, 400);
+  // 不再按 400 截断：涨停家数极端行情可超 400，截断会丢掉尾部个股快照
+  const codes = [...codeSet];
   const quotes = await ds.getQQQuotes(codes).catch(() => ({}));
   const qTimes = Object.values(quotes).map(x => x && x.ticktime).filter(Boolean).sort();
   const latestQT = qTimes.length ? qTimes[qTimes.length - 1] : null;

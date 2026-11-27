@@ -929,10 +929,11 @@
           tag('断板收红 ' + (plSummary.up || 0), 'red') +
           tag('断板收绿 ' + (plSummary.down || 0), 'green') +
           tag('跌停 ' + (plSummary.limitDown || 0), 'green') +
+          (plSummary.missing ? tag('数据缺失 ' + plSummary.missing, '') : '') +
           tag('平均涨幅 ' + (plSummary.avgPct === null ? '—' : ((plSummary.avgPct > 0 ? '+' : '') + N(plSummary.avgPct) + '%')), plSummary.avgPct > 0 ? 'red' : 'green') +
           '</div><div class="pl-tiers">' + plTiers + '</div>' +
           '<div class="note-box">' + E(pl.note || '') +
-          '<br>晋级＝今日仍在涨停池且连板数高于昨日；回封＝今日涨停但连板数未增加；断板＝今日未涨停（按实时涨跌幅分收红 / 收绿 / 跌停）。' +
+          '<br>晋级＝今日仍在涨停池且连板数高于昨日；回封＝今日涨停但连板数未增加；断板＝今日未涨停（按实时涨跌幅分收红 / 收绿 / 跌停）；快照缺失标为「数据缺失」，不臆断方向。' +
           '<b>这是已经发生的市场事实统计，不是买入信号，也不预测明日表现。</b></div></div>'
         : '<div class="card empty">' + E(pl.reason || '昨日连板晋级数据暂不可用') + '</div>') + '</div>';
 
