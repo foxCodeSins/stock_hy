@@ -276,11 +276,13 @@ async function buildDashboard(query) {
   // 连板天梯的历史优势组合标记：与「明日龙头」同一套地位 / 一致分歧规则，不参与任何评分
   const edgeStats = getEdgeStatsSnapshot(f.edgeDays);
   const dragonEdges = an.dragonEdgeMarks(pools, prevHistory, edgeStats && edgeStats.marks, edgeStats && edgeStats.smallMarks);
-  (opps.zt || []).forEach(x => { if (dragonEdges[x.code]) x.dragonEdge = dragonEdges[x.code]; });
+  // 标记同时挂到完整涨停池（天梯用），否则 top80 之外的高板位个股会丢失角标
+  const ladderPool = opps.ladderZt || opps.zt || [];
+  ladderPool.forEach(x => { if (dragonEdges[x.code]) x.dragonEdge = dragonEdges[x.code]; });
   // 首板龙头种子：最近历史回测的分档概率，挂到当日首板卡片（历史日期的天梯不误用当日标记）
   const seed = an.firstBoardSeedBacktest(prevHistory, pools, { asOf: beijingNow().now });
-  (opps.zt || []).forEach(x => { if (seed.marks[x.code]) x.seedMark = seed.marks[x.code]; });
-  (opps.zt || []).forEach(x => { if (seed.cumMarks && seed.cumMarks[x.code]) x.cumRate = seed.cumMarks[x.code]; });
+  ladderPool.forEach(x => { if (seed.marks[x.code]) x.seedMark = seed.marks[x.code]; });
+  ladderPool.forEach(x => { if (seed.cumMarks && seed.cumMarks[x.code]) x.cumRate = seed.cumMarks[x.code]; });
   const relay = an.relayPicks(pools, ov, themes, klineMap, quotes, filtersWithSet);
   // 昨日连板天梯今日晋级情况：用已发生的历史池 + 今日快照，保守判定晋级 / 回封 / 断板
   const prevLadder = an.prevLadderProgress(prevHistory, pools, quotes);

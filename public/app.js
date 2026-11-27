@@ -684,7 +684,8 @@
     const ladderIsHistory = !!(S.ladderDate && S.ladderData && S.ladderData.date === S.ladderDate);
     // 防御性去重：东财上游偶发返回同一只票的重复行，按 code 去重避免天梯里重复显示
     const uniqByCode = arr => { const s = new Set(); return (arr || []).filter(x => { if (!x || s.has(x.code)) return false; s.add(x.code); return true; }); };
-    const ztAll = uniqByCode(ladderIsHistory ? (S.ladderData.zt || []) : ((d.opportunities && d.opportunities.zt) || []));
+    // 天梯用完整涨停池（ladderZt），不受「机会模块 top80」截断影响，避免高板位个股因排序靠后而缺失
+    const ztAll = uniqByCode(ladderIsHistory ? (S.ladderData.zt || []) : ((d.opportunities && (d.opportunities.ladderZt || d.opportunities.zt)) || []));
     const byBoard = new Map();
     ztAll.forEach(x => { const b = Number(x.boards) || 1; if (!byBoard.has(b)) byBoard.set(b, []); byBoard.get(b).push(x); });
     const boardOfCell = b => b >= 5 ? 'em-tier-5' : b === 4 ? 'em-tier-4' : b === 3 ? 'em-tier-3' : b === 2 ? 'em-tier-2' : 'em-tier-1';
